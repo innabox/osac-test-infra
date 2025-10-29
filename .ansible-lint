@@ -1,0 +1,9 @@
+---
+# Skip specific rules
+skip_list:
+  - var-naming[no-role-prefix]
+
+# Exclude files/directories
+exclude_paths:
+  - .cache/
+  - .github/

@@ -1,7 +1,7 @@
 ---
 # Main tasks for test_hub_creation role
 - name: Variables
-  debug:
+  ansible.builtin.debug:
     var: test_hub
 
 - name: Register hub with fulfillment service
@@ -9,7 +9,7 @@
     cmd: >
       {{ cli_binary }} create hub
       --id {{ test_hub.id }}
-      --kubeconfig {{ KUBECONFIG }}
+      --kubeconfig {{ mgmt_kubeconfig }}
       --namespace {{ test_hub.namespace }}
   register: test_hub_creation_hub_creation_result
   changed_when: test_hub_creation_hub_creation_result.rc == 0
@@ -26,12 +26,8 @@
   changed_when: false
 
 - name: Parsed hub information
-  set_fact:
-    parsed_hub: "{{ test_hub_creation_hub_get_result.stdout | from_json  }}"
-
-- name: Parsed Hub
-  debug:
-    var: parsed_hub
+  ansible.builtin.set_fact:
+    parsed_hub: "{{ test_hub_creation_hub_get_result.stdout | from_json }}"
 
 - name: Display new registered hub information summary
   ansible.builtin.debug:
@@ -44,11 +40,11 @@
       Namespace: {{ parsed_hub.object.namespace }}
       ==========================================
   changed_when: true
-  notify: "cleanup"
+  notify: cleanup
 
 - name: Log test success
   ansible.builtin.lineinfile:
     path: "{{ testing_workspace }}/test-execution.log"
     line: "[{{ ansible_date_time.iso8601 }}] PASSED: Hub creation test passed"
     create: true
-    mode: '0644'
+    mode: "0644"

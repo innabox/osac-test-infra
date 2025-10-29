@@ -13,9 +13,9 @@
   register: fulfillment_cli_base_cli_binary_stat
   failed_when: not fulfillment_cli_base_cli_binary_stat.stat.exists
 
-- name: Verify KUBECONFIG file exists
+- name: Verify mgmt_kubeconfig file exists
   ansible.builtin.stat:
-    path: "{{ KUBECONFIG }}"
+    path: "{{ mgmt_kubeconfig }}"
   register: fulfillment_cli_base_kubeconfig_stat
   failed_when: not fulfillment_cli_base_kubeconfig_stat.stat.exists
 
@@ -23,7 +23,7 @@
   ansible.builtin.command:
     cmd: oc whoami
   environment:
-    KUBECONFIG: "{{ KUBECONFIG }}"
+    kubeconfig: "{{ mgmt_kubeconfig }}"
   register: fulfillment_cli_base_oc_whoami_result
   changed_when: false
 
@@ -46,14 +46,14 @@
 
 - name: Display fulfillment-cli connectivity status
   ansible.builtin.debug:
-    msg: "fulfillment-cli connectivity test successful"
+    msg: fulfillment-cli connectivity test successful
   when: fulfillment_cli_base_cli_connectivity_test.rc == 0
 
 - name: Generate access token for gRPC calls
   ansible.builtin.command:
     cmd: "{{ fulfillment_token_script }}"
   environment:
-    KUBECONFIG: "{{ KUBECONFIG }}"
+    kubeconfig: "{{ mgmt_kubeconfig }}"
   register: fulfillment_cli_base_grpc_token_result
   changed_when: false
   no_log: false
@@ -69,7 +69,7 @@
   ansible.builtin.copy:
     content: |
       # CloudKit E2E Test Execution Log
-      KUBECONFIG: {{ KUBECONFIG }}
+      kubeconfig: {{ mgmt_kubeconfig }}
       OpenShift User: {{ fulfillment_cli_base_oc_whoami_result.stdout }}
 
       Started at: {{ ansible_date_time.iso8601 }}

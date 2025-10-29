@@ -6,8 +6,8 @@
   hosts: localhost
   gather_facts: true
   vars:
-    test_name: "Hub Creation Test"
-    test_description: "Test creating and verifying a hub with fulfillment-cli"
+    test_name: Hub Creation Test
+    test_description: Test creating and verifying a hub with fulfillment-cli
 
   tasks:
     - name: Display test information
@@ -35,11 +35,11 @@
             path: "{{ testing_workspace }}/test-execution.log"
             line: "[{{ ansible_date_time.iso8601 }}] FAILED: Hub creation test failed"
             create: true
-            mode: '0644'
+            mode: "0644"
 
         - name: Re-raise the error
           ansible.builtin.fail:
-            msg: "Hub creation test failed"
+            msg: Hub creation test failed
 
   post_tasks:
     - name: Test summary

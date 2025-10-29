@@ -3,22 +3,15 @@
 
 # Hub configuration
 test_hub:
-  id: "e2e-test-hub-{{ ansible_date_time.epoch }}"
+  id: e2e-test-hub-{{ ansible_date_time.epoch }}
   namespace: "{{ test_namespace }}"
-  service_account: "fulfillment-admin"
-  token_duration: "1h"
+  service_account: fulfillment-admin
+  token_duration: 1h
   token_namespace: "{{ test_namespace }}"
 
 # Token creation command
-test_hub_creation_hub_token_command: "oc create token {{ test_hub_creation_hub_service_account }} -n {{ test_hub_creation_hub_token_namespace }} --duration {{ test_hub_creation_hub_token_duration }} --as system:admin"
-
-# Test settings (use defaults, can be overridden by group_vars)
-test_hub_creation_max_wait_time: 1800  # 30 minutes
-test_hub_creation_check_interval: 30   # 30 seconds
+test_hub_creation_hub_token_command: oc create token {{ test_hub_creation_hub_service_account }} -n {{ test_hub_creation_hub_token_namespace }} --duration {{
+  test_hub_creation_hub_token_duration }} --as system:admin
 
 # Temporary files
 test_hub_creation_hub_kubeconfig_file: "{{ testing_workspace }}/hub-kubeconfig-{{ test_hub_creation_hub_id }}.yaml"
-
-# Cleanup settings
-test_hub_creation_cleanup_on_success: true
-test_hub_creation_cleanup_on_failure: true
