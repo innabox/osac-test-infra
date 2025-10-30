@@ -68,7 +68,6 @@
 - name: Initialize test execution log
   ansible.builtin.copy:
     content: |
-      # CloudKit E2E Test Execution Log
       kubeconfig: {{ mgmt_kubeconfig }}
       OpenShift User: {{ fulfillment_cli_base_oc_whoami_result.stdout }}
 

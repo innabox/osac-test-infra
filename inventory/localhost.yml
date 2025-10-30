@@ -1,5 +1,5 @@
 ---
-# Inventory for CloudKit E2E Testing
+# Inventory for OSAC E2E Testing
 all:
   hosts:
     localhost:

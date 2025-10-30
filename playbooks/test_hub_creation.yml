@@ -1,14 +1,13 @@
 ---
-# CloudKit E2E Test: Hub Creation
-# This playbook tests the creation and verification of a hub in the CloudKit system
+# OSAC E2E Test: Hub Creation
+# This playbook tests the creation and verification of a hub in the OSAC system
 
-- name: CloudKit Hub Creation Test
+- name: OSAC Hub Creation Test
   hosts: localhost
   gather_facts: true
   vars:
     test_name: Hub Creation Test
     test_description: Test creating and verifying a hub with fulfillment-cli
-
   tasks:
     - name: Display test information
       ansible.builtin.debug:

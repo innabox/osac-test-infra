@@ -1,10 +1,10 @@
-# CloudKit Test Infrastructure
+# OSAC Test Infrastructure
 
-Ansible-based test infrastructure for CloudKit end-to-end testing.
+Ansible-based test infrastructure for OSAC end-to-end testing.
 
 ## Overview
 
-This repository contains automated testing capabilities for CloudKit hub creation and management through the CloudKit fulfillment service.
+This repository contains automated testing capabilities for OSAC hub creation and management through the OSAC fulfillment service.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ roles/              # Reusable Ansible roles for test functionality
 
 ### Prerequisites
 - Ansible installed
-- Access to CloudKit fulfillment service
+- Access to OSAC fulfillment service
 - `fulfillment-cli` binary
 - `grpcurl` for gRPC API calls
 
@@ -55,7 +55,7 @@ ansible-playbook playbooks/test_hub_creation.yml
 - fulfillment_app_name: Kubernetes app name for your fulfillment api service.
 - fulfillment_port: Listening port for your fulfillment-api
 
-- cloudkit_installer_fulfillment_address: "{{ fulfillment_app_name }}-{{ test_namespace }}.{{ cluster_domain_suffix }}:{{ fulfillment_port }}"
+- osac_installer_fulfillment_address: "{{ fulfillment_app_name }}-{{ test_namespace }}.{{ cluster_domain_suffix }}:{{ fulfillment_port }}"
 - fulfillment_token_script: "oc create token fulfillment-admin -n {{ test_namespace }} --duration 1h --as system:admin"
 
 ### Hub creation specific overrides
