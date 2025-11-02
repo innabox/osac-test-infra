@@ -32,7 +32,7 @@
         - name: Log test failure
           ansible.builtin.lineinfile:
             path: "{{ testing_workspace }}/test-execution.log"
-            line: "[{{ ansible_date_time.iso8601 }}] FAILED: Hub creation test failed"
+            line: "[{{ ansible_date_time.iso8601 }}] FAILED: {{ test_name }} failed"
             create: true
             mode: "0644"
 
@@ -48,7 +48,7 @@
           Test Summary: {{ test_name }}
           ==========================================
           Status: SUCCESS
-          Hub registered and verified successfully
+          {{ test_name }} completed successfully
           ==========================================
       tags:
         - summary

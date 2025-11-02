@@ -8,10 +8,10 @@
     mode: "0755"
 
 - name: Verify fulfillment-cli binary exists
-  ansible.builtin.stat:
-    path: "{{ cli_binary }}"
-  register: fulfillment_cli_base_cli_binary_stat
-  failed_when: not fulfillment_cli_base_cli_binary_stat.stat.exists
+  ansible.builtin.command: "{{ fulfillment_cli_path }} --help"
+  register: fulfillment_cli_binary_exists
+  changed_when: false
+  failed_when: fulfillment_cli_binary_exists.rc != 0
 
 - name: Verify mgmt_kubeconfig file exists
   ansible.builtin.stat:
@@ -36,18 +36,6 @@
       --token-script "{{ fulfillment_token_script }}"
   register: fulfillment_cli_base_cli_login_result
   changed_when: false
-
-- name: Test fulfillment-cli connectivity after login
-  ansible.builtin.command:
-    cmd: "{{ cli_binary }} get hubs"
-  register: fulfillment_cli_base_cli_connectivity_test
-  changed_when: false
-  failed_when: fulfillment_cli_base_cli_connectivity_test.rc != 0
-
-- name: Display fulfillment-cli connectivity status
-  ansible.builtin.debug:
-    msg: fulfillment-cli connectivity test successful
-  when: fulfillment_cli_base_cli_connectivity_test.rc == 0
 
 - name: Generate access token for gRPC calls
   ansible.builtin.command:

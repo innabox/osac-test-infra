@@ -46,7 +46,7 @@ pre-commit run --all-files
 # Run yamllint specifically
 yamllint --strict *.yml *.yaml
 
-# Run ansible-lint specifically  
+# Run ansible-lint specifically
 ansible-lint
 ```
 

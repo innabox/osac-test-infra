@@ -16,7 +16,7 @@ galaxy_info:
         - "39"
         - "40"
   galaxy_tags:
-    - OSAC
+    - osac
     - testing
     - e2e
     - openshift

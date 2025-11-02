@@ -5,7 +5,7 @@
 mgmt_kubeconfig: "{{ ansible_env.KUBECONFIG }}"
 
 # Paths and executables
-fulfillment_cli_path: "{{ ansible_env.GOPATH | default(ansible_env.HOME + '/go') }}/bin/fulfillment-cli"
+fulfillment_cli_path: "fulfillment-cli"
 
 # Default test configuration
 test_namespace: foobar
@@ -13,13 +13,12 @@ testing_workspace: /tmp/osac-e2e-testing
 
 # Fulfillment service configuration for our test environment
 # OpenShift cluster domain suffix (user must specify correct domain)
-cluster_domain_suffix: apps.example.com
+cluster_domain_suffix: apps.hcp.local.lab
 fulfillment_app_name: fulfillment-api
 fulfillment_port: "443"
 
 # Constructed fulfillment addresses using OpenShift naming convention: <app-name>-<namespace>.<cluster-domain>:<port>
 fulfillment_address: "{{ fulfillment_app_name }}-{{ test_namespace }}.{{ cluster_domain_suffix }}:{{ fulfillment_port }}"
-OSAC_installer_fulfillment_address: "{{ fulfillment_app_name }}-{{ test_namespace }}.{{ cluster_domain_suffix }}:{{ fulfillment_port }}"
 fulfillment_token_script: oc create token fulfillment-admin -n {{ test_namespace }} --duration 1h --as system:admin
 
 # Logging and reporting
