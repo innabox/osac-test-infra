@@ -1,0 +1,61 @@
+---
+# - name: Get all existing hubs via gRPC call
+#   ansible.builtin.command:
+#     cmd: >
+#       grpcurl -insecure
+#       -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}"
+#       {{ fulfillment_address }}
+#       private.v1.Hubs/List
+#   register: test_hub_all_hubs
+#   changed_when: false
+#   listen: "cleanup"
+#
+# - name: Parse all hubs information
+#   set_fact:
+#     parsed_hub: test_hub_all_hubs | from_json
+#   listen: cleanup
+#
+# - name: debug all hubs
+#   debug:
+#     var: parsed_hub
+#
+#
+# - name: Display all existing hubs in table format
+#   ansible.builtin.debug:
+#     msg: |
+#       ==========================================
+#       All Registered Hubs ({{ parsed_hub.total }} total)
+#       ==========================================
+#       {% set id_width = [test_hub_creation_hub_data | map(attribute='id') | map('length') | max, 10] | max %}
+#       {{ "%-*s | format(id_width, "Hub ID") }}
+#       {{ "-" * id_width }}
+#       {% for hub in test_hub_creation_hub_data %}
+#       {{ "%-*s" | format(id_width, hub.id | join(', ')) }}
+#       {% endfor %}
+#       ==========================================
+#
+# - name: Find hubs with test prefix for cleanup
+#   ansible.builtin.set_fact:
+#     test_hub_creation_cleanup: "{{ test_hub_creation_hub_data | selectattr('id', 'match', '^e2e-test-hub-.*') | list }}"
+#
+# - name: Delete test hubs via gRPC call
+#   ansible.builtin.command:
+#     cmd: >
+#       grpcurl -insecure
+#       -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}"
+#       -d '{"id": "{{ item.id }}"}'
+#       {{ fulfillment_address }}
+#       private.v1.Hubs/Delete
+#   register: test_hub_creation_cleanup_delete_result
+#   changed_when: test_hub_creation_cleanup_delete_result.rc == 0
+#   failed_when: false
+#   loop: "{{ test_hub_creation_cleanup_hubs }}"
+#   when: test_hub_creation_cleanup_hubs | length > 0
+#   listen: cleanup
+
+- name: Log cleanup result
+  ansible.builtin.lineinfile:
+    path: "{{ logging.test_log_file }}"
+    line: |
+      [{{ ansible_date_time.iso8601 }}] CLEANUP: Hub test files cleaned up
+  listen: cleanup

@@ -1,0 +1,14 @@
+---
+# Default variables for test_hub_creation role
+
+# Hub configuration
+test_hub:
+  id: e2e-test-hub-{{ ansible_date_time.epoch }}
+  namespace: "{{ test_namespace }}"
+  service_account: fulfillment-admin
+  token_duration: 1h
+  token_namespace: "{{ test_namespace }}"
+
+# Token creation command
+test_hub_creation_hub_token_command: oc create token {{ test_hub.service_account }} -n {{ test_hub.token_namespace }} --duration {{
+  test_hub.token_duration }} --as system:admin

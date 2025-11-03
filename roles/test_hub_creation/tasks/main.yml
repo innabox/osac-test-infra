@@ -1,0 +1,50 @@
+---
+# Main tasks for test_hub_creation role
+- name: Variables
+  ansible.builtin.debug:
+    var: test_hub
+
+- name: Register hub with fulfillment service
+  ansible.builtin.command:
+    cmd: >
+      {{ cli_binary }} create hub
+      --id {{ test_hub.id }}
+      --kubeconfig {{ mgmt_kubeconfig }}
+      --namespace {{ test_hub.namespace }}
+  register: test_hub_creation_hub_creation_result
+  changed_when: test_hub_creation_hub_creation_result.rc == 0
+
+- name: Get detailed hub information for new hub via gRPC call
+  ansible.builtin.command:
+    cmd: >
+      grpcurl -insecure
+      -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}"
+      -d '{"id": "{{ test_hub.id }}"}'
+      {{ fulfillment_address }}
+      private.v1.Hubs/Get
+  register: test_hub_creation_hub_get_result
+  changed_when: false
+
+- name: Parsed hub information
+  ansible.builtin.set_fact:
+    parsed_hub: "{{ test_hub_creation_hub_get_result.stdout | from_json }}"
+
+- name: Display new registered hub information summary
+  ansible.builtin.debug:
+    msg: |
+      ==========================================
+      Expected Hub Created: {{ test_hub.id }}
+      ==========================================
+      Hub ID: {{ parsed_hub.object.id }}
+      Creation Timestamp: {{ parsed_hub.object.metadata.creationTimestamp }}
+      Namespace: {{ parsed_hub.object.namespace }}
+      ==========================================
+  changed_when: true
+  notify: cleanup
+
+- name: Log test success
+  ansible.builtin.lineinfile:
+    path: "{{ testing_workspace }}/test-execution.log"
+    line: "[{{ ansible_date_time.iso8601 }}] PASSED: Hub creation test passed"
+    create: true
+    mode: "0644"

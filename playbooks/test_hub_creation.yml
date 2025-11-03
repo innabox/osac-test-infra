@@ -1,0 +1,54 @@
+---
+# OSAC E2E Test: Hub Creation
+# This playbook tests the creation and verification of a hub in the OSAC system
+
+- name: OSAC Hub Creation Test
+  hosts: localhost
+  gather_facts: true
+  vars:
+    test_name: Hub Creation Test
+    test_description: Test creating and verifying a hub with fulfillment-cli
+  tasks:
+    - name: Display test information
+      ansible.builtin.debug:
+        msg: |
+          ==========================================
+          {{ test_name }}
+          ==========================================
+          Description: {{ test_description }}
+          Namespace: {{ test_namespace }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          ==========================================
+      tags:
+        - info
+
+    - name: Run test block
+      block:
+        - name: Run hub creation test
+          ansible.builtin.include_role:
+            name: test_hub_creation
+
+      rescue:
+        - name: Log test failure
+          ansible.builtin.lineinfile:
+            path: "{{ testing_workspace }}/test-execution.log"
+            line: "[{{ ansible_date_time.iso8601 }}] FAILED: {{ test_name }} failed"
+            create: true
+            mode: "0644"
+
+        - name: Re-raise the error
+          ansible.builtin.fail:
+            msg: Hub creation test failed
+
+  post_tasks:
+    - name: Test summary
+      ansible.builtin.debug:
+        msg: |
+          ==========================================
+          Test Summary: {{ test_name }}
+          ==========================================
+          Status: SUCCESS
+          {{ test_name }} completed successfully
+          ==========================================
+      tags:
+        - summary

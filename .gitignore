@@ -1,0 +1,8 @@
+# Binaries
+fulfillment-cli
+
+# Logs
+*.log
+
+# Temporary files
+*.retry

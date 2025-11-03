@@ -1,0 +1,11 @@
+---
+# Skip specific rules
+skip_list:
+  - var-naming[no-role-prefix]
+  - saftey[risky-file-permissions]
+  - shared[meta-no-tags]
+
+# Exclude files/directories
+exclude_paths:
+  - .cache/
+  - .github/

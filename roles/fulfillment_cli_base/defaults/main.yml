@@ -1,0 +1,3 @@
+---
+# CLI binary and configuration
+cli_binary: "{{ fulfillment_cli_path }}"
