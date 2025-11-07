@@ -1,0 +1,35 @@
+---
+- name: Create VM via fulfillment-cli (no-args)
+  ansible.builtin.command:
+    cmd: >
+      {{ fulfillment_cli_path }} delete virtualmachine
+      {{ vm_order_uuid }}
+  register: test_vm_creation_vm_creation_result
+  changed_when: test_vm_creation_vm_creation_result.rc == 0
+
+# VM deletion tasks for test_vm_creation role
+
+- name: Verify VM registration via gRPC call
+  ansible.builtin.command:
+    cmd: >
+      grpcurl -insecure
+      -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}"
+      {{ fulfillment_address }}
+      private.v1.VirtualMachines/List
+  register: test_vm_creation_vm_verification_result
+  changed_when: false
+
+- name: Collect list of VM uuids
+  ansible.builtin.set_fact:
+    known_ids: "{{ test_vm_creation_vm_verification_result.stdout | from_json | json_query('items[].id') | map('trim') | list }}"
+
+- name: Check if VM appears in gRPC response
+  ansible.builtin.assert:
+    that:
+      - vm_order_uuid not in known_ids
+    fail_msg: VM {{ vm_order_uuid }} failed
+    success_msg: VM {{ vm_order_uuid }} sucessfully deleted
+
+- name: Log VM cleanup completion
+  ansible.builtin.debug:
+    msg: "Successfully cleaned up test vm for {{ vm_order_uuid }}"
