@@ -6,3 +6,7 @@ fulfillment-cli
 
 # Temporary files
 *.retry
+
+# Python
+__pycache__/
+*.pyc
