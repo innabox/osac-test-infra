@@ -13,6 +13,6 @@ Feature: Hub Creation
         And the hub details should be retrievable via gRPC
 
     Scenario: Create a hub with a specific ID
-        When I create a hub with ID "test-hub-bdd-001"
+        When I create a hub with ID "e2e-test-hub-bdd-001"
         Then the hub should be registered in the fulfillment service
-        And the hub ID should be "test-hub-bdd-001"
+        And the hub ID should be "e2e-test-hub-bdd-001"

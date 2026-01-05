@@ -1,13 +1,17 @@
 """Shared pytest fixtures for OSAC BDD tests."""
 
 import base64
+import json
 import os
+import subprocess
 import tempfile
 
 import httpx
 import pytest
 import yaml
 from kubernetes import client, config
+
+TEST_HUB_PREFIX = "e2e-test-hub-"
 
 
 @pytest.fixture(scope="session")
@@ -182,3 +186,54 @@ def created_hubs():
 def hub_context():
     """Shared context for hub creation steps."""
     return {}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_hubs(request, fulfillment_config, grpc_token):
+    """Clean up all test hubs at the end of the test session."""
+    yield
+
+    # List all hubs
+    address = fulfillment_config["address"]
+    result = subprocess.run(
+        [
+            "grpcurl", "-insecure",
+            "-H", f"Authorization: Bearer {grpc_token}",
+            address,
+            "private.v1.Hubs/List",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print(f"Warning: Failed to list hubs for cleanup: {result.stderr}")
+        return
+
+    try:
+        hubs_data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(f"Warning: Failed to parse hubs list: {result.stdout}")
+        return
+
+    # Find and delete test hubs
+    hubs = hubs_data.get("items", [])
+    test_hubs = [h for h in hubs if h.get("id", "").startswith(TEST_HUB_PREFIX)]
+
+    for hub in test_hubs:
+        hub_id = hub["id"]
+        delete_result = subprocess.run(
+            [
+                "grpcurl", "-insecure",
+                "-H", f"Authorization: Bearer {grpc_token}",
+                "-d", json.dumps({"id": hub_id}),
+                address,
+                "private.v1.Hubs/Delete",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if delete_result.returncode == 0:
+            print(f"Cleaned up test hub: {hub_id}")
+        else:
+            print(f"Warning: Failed to delete hub {hub_id}: {delete_result.stderr}")
