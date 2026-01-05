@@ -12,6 +12,10 @@ import yaml
 from kubernetes import client, config
 
 TEST_HUB_PREFIX = "e2e-test-hub-"
+TEST_VM_PREFIX = "e2e-test-vm-"
+VM_TEMPLATE = "osac.templates.ocp_virt_vm"
+VM_READY_TIMEOUT = 600  # 10 minutes
+VM_CHECK_INTERVAL = 30  # 30 seconds
 
 
 @pytest.fixture(scope="session")
@@ -237,3 +241,133 @@ def cleanup_test_hubs(request, fulfillment_config, grpc_token):
             print(f"Cleaned up test hub: {hub_id}")
         else:
             print(f"Warning: Failed to delete hub {hub_id}: {delete_result.stderr}")
+
+
+# VM-specific fixtures
+
+
+@pytest.fixture
+def vm_context():
+    """Shared context for VM creation steps."""
+    return {}
+
+
+@pytest.fixture
+def created_vms():
+    """Track created VMs for cleanup."""
+    vms = []
+    yield vms
+
+
+@pytest.fixture(scope="session")
+def ensure_hub_exists(fulfillment_config, hub_kubeconfig, grpc_token):
+    """Ensure a hub exists for VM creation. Create one if needed."""
+    address = fulfillment_config["address"]
+    cli_path = fulfillment_config["cli_path"]
+    namespace = fulfillment_config["namespace"]
+
+    # Check if any hub exists via gRPC
+    result = subprocess.run(
+        [
+            "grpcurl", "-insecure",
+            "-H", f"Authorization: Bearer {grpc_token}",
+            address,
+            "private.v1.Hubs/List",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode == 0:
+        try:
+            hubs = json.loads(result.stdout).get("items", [])
+            if hubs:
+                return hubs[0]["id"]  # Use existing hub
+        except json.JSONDecodeError:
+            pass
+
+    # Create a test hub for VM tests
+    hub_id = "e2e-test-hub-for-vms"
+    create_result = subprocess.run(
+        [
+            cli_path, "create", "hub",
+            "--id", hub_id,
+            "--namespace", namespace,
+            "--kubeconfig", hub_kubeconfig,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if create_result.returncode != 0:
+        pytest.fail(f"Failed to create hub for VM tests: {create_result.stderr}")
+
+    return hub_id
+
+
+@pytest.fixture(scope="session")
+def ensure_template_exists(fulfillment_config, keycloak_token):
+    """Verify the VM template exists."""
+    cli_path = fulfillment_config["cli_path"]
+    template = VM_TEMPLATE
+
+    result = subprocess.run(
+        [cli_path, "get", "virtualmachinetemplates"],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        pytest.fail(f"Failed to list templates: {result.stderr}")
+
+    if template not in result.stdout:
+        pytest.fail(f"Template '{template}' not found. Available: {result.stdout}")
+
+    return template
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_vms(request, fulfillment_config, grpc_token):
+    """Clean up all test VMs at the end of the test session."""
+    yield
+
+    # List all VMs
+    address = fulfillment_config["address"]
+    cli_path = fulfillment_config["cli_path"]
+    result = subprocess.run(
+        [
+            "grpcurl", "-insecure",
+            "-H", f"Authorization: Bearer {grpc_token}",
+            address,
+            "private.v1.VirtualMachines/List",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print(f"Warning: Failed to list VMs for cleanup: {result.stderr}")
+        return
+
+    try:
+        vms_data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(f"Warning: Failed to parse VMs list: {result.stdout}")
+        return
+
+    # Find and delete test VMs (those created by tests have UUIDs tracked)
+    # For safety, we delete all VMs as they are test resources
+    vms = vms_data.get("items", [])
+    for vm in vms:
+        vm_id = vm.get("id", "")
+        if not vm_id:
+            continue
+
+        delete_result = subprocess.run(
+            [cli_path, "delete", "virtualmachine", vm_id],
+            capture_output=True,
+            text=True,
+        )
+        if delete_result.returncode == 0:
+            print(f"Cleaned up test VM: {vm_id}")
+        else:
+            print(f"Warning: Failed to delete VM {vm_id}: {delete_result.stderr}")
