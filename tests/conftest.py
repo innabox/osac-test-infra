@@ -259,6 +259,43 @@ def created_vms():
     yield vms
 
 
+@pytest.fixture
+def ssh_keypair():
+    """Generate a temporary SSH key pair for testing."""
+    key_dir = tempfile.mkdtemp(prefix="ssh-test-")
+    private_key_path = os.path.join(key_dir, "id_rsa")
+    public_key_path = os.path.join(key_dir, "id_rsa.pub")
+
+    # Generate SSH key pair using ssh-keygen
+    result = subprocess.run(
+        [
+            "ssh-keygen", "-t", "rsa", "-b", "2048",
+            "-f", private_key_path,
+            "-N", "",  # No passphrase
+            "-C", "test@osac-e2e",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"Failed to generate SSH key: {result.stderr}")
+
+    # Read the public key
+    with open(public_key_path) as f:
+        public_key = f.read().strip()
+
+    yield {
+        "private_key_path": private_key_path,
+        "public_key_path": public_key_path,
+        "public_key": public_key,
+        "key_dir": key_dir,
+    }
+
+    # Cleanup
+    import shutil
+    shutil.rmtree(key_dir, ignore_errors=True)
+
+
 @pytest.fixture(scope="session")
 def ensure_hub_exists(fulfillment_config, hub_kubeconfig, grpc_token):
     """Ensure a hub exists for VM creation. Create one if needed."""

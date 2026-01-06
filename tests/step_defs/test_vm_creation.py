@@ -1,5 +1,6 @@
 """Step definitions for VM creation feature."""
 
+import base64
 import json
 import re
 import subprocess
@@ -9,6 +10,8 @@ from pytest_bdd import given, when, then, scenarios, parsers
 
 VM_READY_TIMEOUT = 600  # 10 minutes
 VM_CHECK_INTERVAL = 30  # 30 seconds
+SSH_TIMEOUT = 60  # seconds to wait for SSH connection
+SSH_RETRY_INTERVAL = 10  # seconds between SSH retries
 
 scenarios("../features/vm_creation.feature")
 
@@ -166,4 +169,129 @@ def wait_for_vm_ready(fulfillment_config, grpc_token, vm_context, minutes):
     raise AssertionError(
         f"VM {vm_uuid} did not reach ready state within {minutes} minutes. "
         f"Last state: {last_state}, elapsed: {elapsed:.0f}s"
+    )
+
+
+@when(parsers.parse('I create a VM with template "{template}" and generated SSH key'))
+def create_vm_with_ssh_key(
+    fulfillment_config, vm_context, created_vms, ssh_keypair, template
+):
+    """Create a VM with SSH public key parameter."""
+    cli_path = fulfillment_config["cli_path"]
+    public_key = ssh_keypair["public_key"]
+
+    cmd = [
+        cli_path, "create", "virtualmachine",
+        "--template", template,
+        "-p", f"ssh_public_key={public_key}",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"Failed to create VM: {result.stderr}"
+
+    uuid_match = re.findall(r"'([^']+)'", result.stdout)
+    assert uuid_match, f"Could not extract VM UUID from output: {result.stdout}"
+
+    vm_uuid = uuid_match[0]
+    vm_context["vm_uuid"] = vm_uuid
+    vm_context["ssh_keypair"] = ssh_keypair
+    created_vms.append(vm_uuid)
+
+
+@when(parsers.parse('I create a VM with template "{template}" and cloud-init with SSH key'))
+def create_vm_with_cloud_init(
+    fulfillment_config, vm_context, created_vms, ssh_keypair, template
+):
+    """Create a VM with cloud-init configuration including SSH key."""
+    cli_path = fulfillment_config["cli_path"]
+    public_key = ssh_keypair["public_key"]
+
+    # Create cloud-init user-data with SSH key
+    cloud_init_config = f"""#cloud-config
+users:
+  - name: fedora
+    ssh_authorized_keys:
+      - {public_key}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+"""
+    cloud_init_b64 = base64.b64encode(cloud_init_config.encode()).decode()
+
+    cmd = [
+        cli_path, "create", "virtualmachine",
+        "--template", template,
+        "-p", f"cloud_init_config={cloud_init_b64}",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"Failed to create VM: {result.stderr}"
+
+    uuid_match = re.findall(r"'([^']+)'", result.stdout)
+    assert uuid_match, f"Could not extract VM UUID from output: {result.stdout}"
+
+    vm_uuid = uuid_match[0]
+    vm_context["vm_uuid"] = vm_uuid
+    vm_context["ssh_keypair"] = ssh_keypair
+    vm_context["ssh_user"] = "fedora"  # User created by cloud-init
+    created_vms.append(vm_uuid)
+
+
+@then("I should be able to SSH into the VM")
+def verify_ssh_access(vm_context):
+    """Verify SSH connectivity to the VM using virtctl ssh."""
+    vm_uuid = vm_context["vm_uuid"]
+    ssh_keypair = vm_context["ssh_keypair"]
+    private_key_path = ssh_keypair["private_key_path"]
+
+    # Find the KubeVirt VirtualMachine by fulfillment UUID label
+    result = subprocess.run(
+        [
+            "oc", "get", "virtualmachine", "-A",
+            "-l", f"cloudkit.openshift.io/virtualmachine-uuid={vm_uuid}",
+            "-o", "jsonpath={.items[0].metadata.namespace}/{.items[0].metadata.name}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"Failed to find VM: {result.stderr}"
+    assert result.stdout, f"No VirtualMachine found with UUID {vm_uuid}"
+
+    ns_name = result.stdout.strip()
+    namespace, vm_name = ns_name.split("/")
+
+    # The VMI namespace follows pattern: {base-namespace}-{vm-name}
+    vmi_namespace = f"{namespace}-{vm_name}"
+
+    # Determine SSH user (fedora for cloud-init, default for ssh_public_key)
+    ssh_user = vm_context.get("ssh_user", "fedora")
+
+    # Try to SSH with virtctl (retries)
+    start_time = time.time()
+    last_error = None
+
+    while time.time() - start_time < SSH_TIMEOUT:
+        result = subprocess.run(
+            [
+                "virtctl", "ssh",
+                "-n", vmi_namespace,
+                "-i", private_key_path,
+                "--known-hosts=/dev/null",
+                f"--username={ssh_user}",
+                f"vmi/{vm_name}",
+                "--command", "echo 'SSH connection successful'",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            assert "SSH connection successful" in result.stdout
+            return
+
+        last_error = result.stderr or result.stdout
+        print(f"SSH attempt failed: {last_error}, retrying...")
+        time.sleep(SSH_RETRY_INTERVAL)
+
+    raise AssertionError(
+        f"Failed to SSH into VM {vm_uuid} ({vm_name}) as {ssh_user}: {last_error}"
     )
