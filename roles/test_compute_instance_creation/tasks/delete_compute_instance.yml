@@ -15,7 +15,7 @@
       grpcurl -insecure
       -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}"
       {{ fulfillment_address }}
-      private.v1.ComputeInstances/List
+      fulfillment.v1.ComputeInstances/List
   register: test_compute_instance_verification_result
   changed_when: false
 

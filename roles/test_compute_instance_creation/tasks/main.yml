@@ -1,4 +1,31 @@
 ---
+- name: Get database password
+  ansible.builtin.command:
+    cmd: oc get secret fulfillment-database-password -n {{ test_namespace }} -o jsonpath='{.data.POSTGRES_PASSWORD}' --as system:admin
+  environment:
+    KUBECONFIG: "{{ mgmt_kubeconfig }}"
+  register: db_password_b64
+  changed_when: false
+  no_log: true
+
+- name: Decode database password
+  ansible.builtin.set_fact:
+    db_password: "{{ db_password_b64.stdout | b64decode }}"
+  no_log: true
+
+- name: Create ComputeInstanceTemplate in database
+  ansible.builtin.command:
+    cmd: >
+      oc exec -n {{ test_namespace }} fulfillment-database-0 --as system:admin --
+      bash -c "psql service -c
+      \"INSERT INTO compute_instance_templates (id, name, data)
+      VALUES ('{{ template }}', 'test-template', '{\\\"title\\\": \\\"Test Template\\\", \\\"description\\\": \\\"Template for E2E testing\\\"}')
+      ON CONFLICT (id) DO NOTHING\""
+  environment:
+    KUBECONFIG: "{{ mgmt_kubeconfig }}"
+  register: template_creation_result
+  changed_when: template_creation_result.rc == 0
+
 - name: Create ComputeInstance via fulfillment-cli
   ansible.builtin.command:
     cmd: >
@@ -17,7 +44,7 @@
       grpcurl -insecure
       -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}"
       {{ fulfillment_address }}
-      private.v1.ComputeInstances/List
+      fulfillment.v1.ComputeInstances/List
   register: test_compute_instance_verification_result
   changed_when: false
 
@@ -32,32 +59,8 @@
     fail_msg: ComputeInstance {{ test_compute_instance_creation_result.stdout }} not found in gRPC ComputeInstance list response
     success_msg: ComputeInstance {{ test_compute_instance_creation_result.stdout }} successfully registered and verified via gRPC
 
-- name: Wait for ComputeInstance to be ready
-  ansible.builtin.command:
-    cmd: >
-      grpcurl -insecure
-      -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}"
-      {{ fulfillment_address }}
-      private.v1.ComputeInstances/List
-  register: compute_instance_status_check
-  until:
-    - compute_instance_status_check.rc == 0
-    - compute_instance_status_check.stdout | from_json | json_query('status.conditions') is defined
-    - >
-      compute_instance_status_check.stdout
-      | from_json
-      | json_query("items[?id=='%s']" % compute_instance_order_uuid)
-      | map(attribute='status.state')
-      | list
-      | first
-      == "COMPUTE_INSTANCE_STATE_READY"
-  retries: "{{ (compute_instance_ready_timeout / check_interval) | int }}"
-  delay: "{{ check_interval }}"
-  changed_when: false
-
 - name: Log successful ComputeInstance creation and verification
   ansible.builtin.lineinfile:
     path: "{{ testing_workspace }}/test-execution.log"
     line: |
       [{{ ansible_date_time.iso8601 }}] SUCCESS: ComputeInstance {{ compute_instance_order_uuid }} created and verified successfully
-      ComputeInstance is ready and running

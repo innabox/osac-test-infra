@@ -23,7 +23,7 @@
   ansible.builtin.command:
     cmd: oc whoami
   environment:
-    kubeconfig: "{{ mgmt_kubeconfig }}"
+    KUBECONFIG: "{{ mgmt_kubeconfig }}"
   register: fulfillment_cli_base_oc_whoami_result
   changed_when: false
 
@@ -41,7 +41,7 @@
   ansible.builtin.command:
     cmd: "{{ fulfillment_token_script }}"
   environment:
-    kubeconfig: "{{ mgmt_kubeconfig }}"
+    KUBECONFIG: "{{ mgmt_kubeconfig }}"
   register: fulfillment_cli_base_grpc_token_result
   changed_when: false
   no_log: false
