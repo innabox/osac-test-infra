@@ -1,0 +1,35 @@
+---
+- name: Delete ComputeInstance via fulfillment-cli
+  ansible.builtin.command:
+    cmd: >
+      {{ fulfillment_cli_path }} delete computeinstance
+      {{ compute_instance_order_uuid }}
+  register: test_compute_instance_deletion_result
+  changed_when: test_compute_instance_deletion_result.rc == 0
+
+# ComputeInstance deletion verification tasks
+
+- name: Verify ComputeInstance deletion via gRPC call
+  ansible.builtin.command:
+    cmd: >
+      grpcurl -insecure
+      -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}"
+      {{ fulfillment_address }}
+      fulfillment.v1.ComputeInstances/List
+  register: test_compute_instance_verification_result
+  changed_when: false
+
+- name: Collect list of ComputeInstance UUIDs
+  ansible.builtin.set_fact:
+    known_ids: "{{ test_compute_instance_verification_result.stdout | from_json | json_query('items[].id') | map('trim') | list }}"
+
+- name: Check if ComputeInstance was deleted
+  ansible.builtin.assert:
+    that:
+      - compute_instance_order_uuid not in known_ids
+    fail_msg: ComputeInstance {{ compute_instance_order_uuid }} deletion failed
+    success_msg: ComputeInstance {{ compute_instance_order_uuid }} successfully deleted
+
+- name: Log ComputeInstance cleanup completion
+  ansible.builtin.debug:
+    msg: "Successfully cleaned up test ComputeInstance {{ compute_instance_order_uuid }}"

@@ -1,0 +1,47 @@
+---
+# OSAC E2E Test: ComputeInstance Creation
+# This playbook tests the creation and verification of compute instances
+
+- name: OSAC ComputeInstance Creation Test
+  hosts: localhost
+  gather_facts: true
+  vars:
+    test_name: ComputeInstance Creation Test
+    test_description: Test creating and verifying a ComputeInstance with fulfillment-cli
+  tasks:
+    - name: Display test information
+      ansible.builtin.debug:
+        msg: |
+          {{ test_name }}
+          ==========================================
+          Description: {{ test_description }}
+          Namespace: {{ test_namespace }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          ==========================================
+
+    - name: Execute ComputeInstance creation test
+      block:
+        - name: Run ComputeInstance creation test
+          ansible.builtin.include_role:
+            name: test_compute_instance_creation
+          vars:
+            compute_instance_template: osac.templates.ocp_virt_vm
+
+      rescue:
+        - name: Log test failure
+          ansible.builtin.lineinfile:
+            path: "{{ testing_workspace }}/test-execution.log"
+            line: "[{{ ansible_date_time.iso8601 }}] FAILED: ComputeInstance creation test failed"
+            create: true
+            mode: "0644"
+
+        - name: Re-raise the error
+          ansible.builtin.fail:
+            msg: ComputeInstance creation test failed
+
+    - name: Execute ComputeInstance cleanup
+      ansible.builtin.include_role:
+        name: test_compute_instance_creation
+        tasks_from: delete_compute_instance
+      vars:
+        compute_instance_id: "{{ test_compute_instance_id }}"

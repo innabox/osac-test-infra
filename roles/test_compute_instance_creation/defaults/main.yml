@@ -1,0 +1,18 @@
+---
+cli_binary: cli_binary_path
+
+# ComputeInstance template and settings (reasonable defaults)
+template: osac.templates.ocp_virt_vm
+cpu_cores: 2
+memory_gb: 4
+disk_size_gb: 20
+network: default
+
+# Test settings (reasonable defaults, defer to group_vars)
+ready_timeout: 900 # 15 minutes for ComputeInstance to become ready
+
+# Temporary files
+compute_instance_config_file: "{{ testing_workspace }}/compute-instance-config-{{ compute_instance_id }}.yaml"
+
+check_interval: 120
+compute_instance_ready_timeout: 600

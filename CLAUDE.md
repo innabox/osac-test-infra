@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This repository contains Ansible-based test infrastructure for OSAC end-to-end testing. It focuses on testing hub creation and VM lifecycle management through the OSAC fulfillment service using gRPC APIs and the fulfillment-cli tool.
+This repository contains Ansible-based test infrastructure for OSAC end-to-end testing. It focuses on testing hub creation and ComputeInstance lifecycle management through the OSAC fulfillment service using gRPC APIs and the fulfillment-cli tool.
 
 ## Architecture
 
 ### Directory Structure
 - `playbooks/` - Main Ansible playbooks for executing tests
 - `roles/` - Reusable Ansible roles for test functionality
-  - `test_vm_creation/` - Role for VM creation, verification, and cleanup
+  - `test_compute_instance_creation/` - Role for ComputeInstance creation, verification, and cleanup
   - `test_hub_creation/` - Role for hub creation, verification, and cleanup
   - `fulfillment_cli_base/` - Base role for fulfillment CLI operations (dependency)
 - `inventory/` - Ansible inventory and group variables
@@ -25,14 +25,14 @@ This repository contains Ansible-based test infrastructure for OSAC end-to-end t
 - Hub verification through gRPC API calls (private.v1.Hubs/Get)
 - Automated cleanup of hub resources and temporary files
 
-**VM Lifecycle Testing**
-- VM creation using fulfillment-cli with OSAC templates
+**ComputeInstance Lifecycle Testing**
+- ComputeInstance creation using fulfillment-cli with OSAC templates
 - gRPC-based verification through the fulfillment service
 - Status monitoring and readiness checks
 - Automated cleanup and deletion
 
 **Communication Methods**
-- `fulfillment-cli` for hub/VM creation operations
+- `fulfillment-cli` for hub/ComputeInstance creation operations
 - `grpcurl` for direct API communication with fulfillment service
 - gRPC authentication using Bearer tokens from OpenShift service accounts
 
@@ -57,33 +57,33 @@ Execute hub creation test:
 ansible-playbook playbooks/test_hub_creation.yml -e test_hub_id=my-test-hub-001 -e test_namespace=foobar
 ```
 
-Execute VM creation test (if VM creation playbook exists):
+Execute ComputeInstance creation test:
 ```bash
-ansible-playbook playbooks/test_vm_creation.yml -e test_vm_id=my-test-vm-001 -e test_namespace=foobar
+ansible-playbook playbooks/test_compute_instance_creation.yml -e test_compute_instance_id=my-test-ci-001 -e test_namespace=foobar
 ```
 
 ### Test Tags
 
 Use tags to run specific parts of tests:
 - `info` - Display test information and resource listings
-- `test` - Run actual creation tests (hub_creation, vm_creation)
+- `test` - Run actual creation tests (hub_creation, compute_instance_creation)
 - `validation` - Resource verification and status checks
 - `cleanup` - Resource deletion and file cleanup
-- `mrclean` - Mass cleanup of test VMs with e2e-test-vm- prefix
+- `mrclean` - Mass cleanup of test ComputeInstances with e2e-test-ci- prefix
 
 Examples:
 ```bash
 # Run only hub creation without cleanup
 ansible-playbook playbooks/test_hub_creation.yml --tags test
 
-# Run only VM creation without cleanup (if playbook exists)
-ansible-playbook playbooks/test_vm_creation.yml --tags test
+# Run only ComputeInstance creation without cleanup
+ansible-playbook playbooks/test_compute_instance_creation.yml --tags test
 
 # Run only cleanup operations
-ansible-playbook playbooks/test_vm_creation.yml --tags cleanup
+ansible-playbook playbooks/test_compute_instance_creation.yml --tags cleanup
 
-# Mass cleanup of all test VMs
-ansible-playbook playbooks/test_vm_creation.yml --tags mrclean
+# Mass cleanup of all test ComputeInstances
+ansible-playbook playbooks/test_compute_instance_creation.yml --tags mrclean
 ```
 
 ## Configuration
@@ -103,9 +103,9 @@ ansible-playbook playbooks/test_vm_creation.yml --tags mrclean
 - `hub_service_account` - Service account for hub operations (default: "fulfillment-admin")
 - `hub_token_duration` - Token validity period (default: "1h")
 
-## VM Template Configuration
+## ComputeInstance Template Configuration
 
-Default VM template: `cloudkit.templates.ocp_virt_vm`
+Default ComputeInstance template: `cloudkit.templates.ocp_virt_vm`
 - CPU: 2 cores
 - Memory: 4GB
 - Disk: 20GB
@@ -117,17 +117,17 @@ Default VM template: `cloudkit.templates.ocp_virt_vm`
 **Hub Operations:**
 - `private.v1.Hubs/Get` - Get specific hub details
 
-**VM Operations:**
-- `private.v1.VirtualMachines/List` - List all VMs
-- `private.v1.VirtualMachines/Get` - Get specific VM details
-- `private.v1.VirtualMachines/Delete` - Delete a VM
+**ComputeInstance Operations:**
+- `private.v1.ComputeInstances/List` - List all ComputeInstances
+- `private.v1.ComputeInstances/Get` - Get specific ComputeInstance details
+- `private.v1.ComputeInstances/Delete` - Delete a ComputeInstance
 
 All gRPC calls use insecure connections and require Bearer token authentication.
 
 ## Test Execution Flow
 
 1. **Setup**: Display test information and parameters
-2. **Creation**: Create hub/VM using fulfillment-cli with specified parameters
+2. **Creation**: Create hub/ComputeInstance using fulfillment-cli with specified parameters
 3. **Verification**: Verify registration via gRPC API
 4. **Monitoring**: Wait for resources to reach desired status
 5. **Cleanup**: Delete resources and remove temporary files
