@@ -1,0 +1,21 @@
+---
+# Meta information for test_vm_creation role
+
+galaxy_info:
+  author: OSAC E2E Testing
+  description: Role for testing VM creation and lifecycle in OSAC
+  company: Red Hat
+  license: Apache-2.0
+  min_ansible_version: all
+  platforms:
+    - name: EL
+      versions:
+        - all
+
+dependencies:
+  - role: fulfillment_cli_base
+    when: fulfillment_cli_base_required | default(true)
+
+collections:
+  - ansible.builtin
+  - community.general

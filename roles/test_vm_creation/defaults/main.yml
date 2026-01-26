@@ -1,0 +1,18 @@
+---
+cli_binary: cli_binary_path
+
+# VM template and settings (reasonable defaults)
+template: cloudkit.templates.ocp_virt_vm
+cpu_cores: 2
+memory_gb: 4
+disk_size_gb: 20
+network: default
+
+# Test settings (reasonable defaults, defer to group_vars)
+ready_timeout: 900 # 15 minutes for VM to become ready
+
+# Temporary files
+vm_config_file: "{{ testing_workspace }}/vm-config-{{ vm_id }}.yaml"
+
+check_interval: 120
+vm_ready_timeout: 600
