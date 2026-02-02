@@ -1,0 +1,14 @@
+---
+# Default variables for ComputeInstance restart testing
+
+# Template to use for the test ComputeInstance
+compute_instance_template: osac.templates.ocp_virt_vm
+
+# Timeout for waiting for ComputeInstance to be ready (in seconds)
+compute_instance_ready_timeout: 900  # 15 minutes
+
+# Timeout for waiting for restart to complete (in seconds)
+compute_instance_restart_timeout: 300  # 5 minutes
+
+# Poll interval for status checks (in seconds)
+status_poll_interval: 10

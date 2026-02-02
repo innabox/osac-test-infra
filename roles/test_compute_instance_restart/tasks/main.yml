@@ -1,0 +1,186 @@
+---
+# Main tasks for ComputeInstance restart testing
+# Prerequisites: ComputeInstance should already be created and compute_instance_order_uuid should be set
+
+- name: Wait for ComputeInstance to reach Ready phase
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance
+      -n {{ test_namespace }}
+      -l cloudkit.openshift.io/computeinstance-uuid={{ compute_instance_order_uuid }}
+      -o jsonpath='{.items[0].status.phase}'
+  register: ci_phase_check
+  until: ci_phase_check.stdout == "Ready"
+  retries: "{{ (compute_instance_ready_timeout / status_poll_interval) | int }}"
+  delay: "{{ status_poll_interval }}"
+  changed_when: false
+
+- name: Get ComputeInstance name from Kubernetes
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance
+      -n {{ test_namespace }}
+      -l cloudkit.openshift.io/computeinstance-uuid={{ compute_instance_order_uuid }}
+      -o jsonpath='{.items[0].metadata.name}'
+  register: ci_name_result
+  changed_when: false
+
+- name: Set ComputeInstance name fact
+  ansible.builtin.set_fact:
+    compute_instance_name: "{{ ci_name_result.stdout }}"
+
+- name: Get VirtualMachineInstance details before restart
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance {{ compute_instance_name }}
+      -n {{ test_namespace }}
+      -o jsonpath='{.status.virtualMachineReference.namespace}'
+  register: vmi_namespace_result
+  changed_when: false
+
+- name: Get original VMI creation timestamp
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get virtualmachineinstance
+      -n {{ vmi_namespace_result.stdout }}
+      -l cloudkit.openshift.io/computeinstance={{ compute_instance_name }}
+      -o jsonpath='{.items[0].metadata.creationTimestamp}'
+  register: original_vmi_timestamp
+  changed_when: false
+
+- name: Get initial lastRestartedAt value before restart
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance {{ compute_instance_name }}
+      -n {{ test_namespace }}
+      -o jsonpath='{.status.lastRestartedAt}'
+  register: initial_last_restarted
+  changed_when: false
+
+- name: Display pre-restart state
+  ansible.builtin.debug:
+    msg: |
+      Pre-Restart State:
+      ComputeInstance: {{ compute_instance_name }}
+      Namespace: {{ test_namespace }}
+      VMI Namespace: {{ vmi_namespace_result.stdout }}
+      Original VMI Created: {{ original_vmi_timestamp.stdout }}
+      Initial lastRestartedAt: {{ initial_last_restarted.stdout | default('nil') }}
+
+- name: Trigger restart via gRPC API (update restartRequestedAt)
+  ansible.builtin.shell:
+    cmd: |
+      TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+      echo "$TIMESTAMP"
+      grpcurl -insecure \
+        -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}" \
+        -d '{
+          "object": {
+            "id": "{{ compute_instance_order_uuid }}",
+            "spec": {
+              "template": "{{ compute_instance_template }}",
+              "restart_requested_at": "'"${TIMESTAMP}"'"
+            }
+          },
+          "updateMask": {
+            "paths": ["spec.restart_requested_at"]
+          }
+        }' \
+        {{ fulfillment_address }} \
+        fulfillment.v1.ComputeInstances/Update
+  register: restart_trigger_result
+  changed_when: restart_trigger_result.rc == 0
+
+- name: Extract restart_requested_at timestamp
+  ansible.builtin.set_fact:
+    restart_requested_at: "{{ restart_trigger_result.stdout_lines[0] }}"
+
+- name: Display restart request timestamp
+  ansible.builtin.debug:
+    msg: "Restart requested at: {{ restart_requested_at }}"
+
+- name: Wait for status.lastRestartedAt to be updated
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance {{ compute_instance_name }}
+      -n {{ test_namespace }}
+      -o jsonpath='{.status.lastRestartedAt}'
+  register: last_restarted_check
+  until: >
+    last_restarted_check.stdout != "" and
+    last_restarted_check.stdout != initial_last_restarted.stdout and
+    last_restarted_check.stdout >= restart_requested_at
+  retries: "{{ (compute_instance_restart_timeout / status_poll_interval) | int }}"
+  delay: "{{ status_poll_interval }}"
+  changed_when: false
+
+- name: Verify lastRestartedAt was updated correctly
+  ansible.builtin.assert:
+    that:
+      - last_restarted_check.stdout != ""
+      - last_restarted_check.stdout != initial_last_restarted.stdout
+      - last_restarted_check.stdout >= restart_requested_at
+    fail_msg: |
+      lastRestartedAt verification failed:
+      - Current value: {{ last_restarted_check.stdout }}
+      - Initial value: {{ initial_last_restarted.stdout }}
+      - restart_requested_at: {{ restart_requested_at }}
+    success_msg: "lastRestartedAt was updated from {{ initial_last_restarted.stdout | default('nil') }} to {{ last_restarted_check.stdout }}"
+
+- name: Wait for new VMI to be created
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get virtualmachineinstance
+      -n {{ vmi_namespace_result.stdout }}
+      -l cloudkit.openshift.io/computeinstance={{ compute_instance_name }}
+      -o jsonpath='{.items[0].metadata.creationTimestamp}'
+  register: new_vmi_timestamp_check
+  until: new_vmi_timestamp_check.stdout != original_vmi_timestamp.stdout
+  retries: "{{ (compute_instance_restart_timeout / status_poll_interval) | int }}"
+  delay: "{{ status_poll_interval }}"
+  changed_when: false
+
+- name: Verify new VMI timestamp is after original
+  ansible.builtin.assert:
+    that:
+      - new_vmi_timestamp_check.stdout > original_vmi_timestamp.stdout
+    fail_msg: New VMI timestamp {{ new_vmi_timestamp_check.stdout }} is not after original {{ original_vmi_timestamp.stdout }}
+    success_msg: New VMI was created successfully after restart
+
+- name: Check for RestartFailed condition
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance {{ compute_instance_name }}
+      -n {{ test_namespace }}
+      -o jsonpath='{.status.conditions[?(@.type=="RestartFailed")].status}'
+  register: restart_failed_check
+  changed_when: false
+
+- name: Assert RestartFailed condition is not set
+  ansible.builtin.assert:
+    that:
+      - restart_failed_check.stdout == "" or restart_failed_check.stdout == "False"
+    fail_msg: RestartFailed condition is set - restart failed!
+    success_msg: No RestartFailed condition - restart succeeded
+
+- name: Display post-restart state
+  ansible.builtin.debug:
+    msg: |
+      Post-Restart State:
+      Initial lastRestartedAt: {{ initial_last_restarted.stdout | default('nil') }}
+      Final lastRestartedAt: {{ last_restarted_check.stdout }}
+      restart_requested_at: {{ restart_requested_at }}
+      Original VMI Created: {{ original_vmi_timestamp.stdout }}
+      New VMI Created: {{ new_vmi_timestamp_check.stdout }}
+
+- name: Log successful ComputeInstance restart
+  ansible.builtin.lineinfile:
+    path: "{{ testing_workspace }}/test-execution.log"
+    line: |
+      [{{ ansible_date_time.iso8601 }}] SUCCESS: ComputeInstance {{ compute_instance_order_uuid }} restarted successfully
+      - restart_requested_at: {{ restart_requested_at }}
+      - Initial lastRestartedAt: {{ initial_last_restarted.stdout | default('nil') }}
+      - Final lastRestartedAt: {{ last_restarted_check.stdout }}
+      - New VMI created: {{ new_vmi_timestamp_check.stdout }}
+    create: true
+    mode: "0644"

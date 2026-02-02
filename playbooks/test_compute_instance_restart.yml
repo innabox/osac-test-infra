@@ -1,0 +1,66 @@
+---
+# OSAC E2E Test: ComputeInstance Restart
+# This playbook tests the restart functionality of compute instances
+# Related to: MGMT-22682
+
+- name: OSAC ComputeInstance Restart Test
+  hosts: localhost
+  gather_facts: true
+  vars:
+    test_name: ComputeInstance Restart Test
+    test_description: Test creating a ComputeInstance, triggering restart, and verifying restart completed successfully
+    test_compute_instance_id: "e2e-test-restart-{{ ansible_date_time.epoch }}"
+  tasks:
+    - name: Display test information
+      ansible.builtin.debug:
+        msg: |
+          {{ test_name }}
+          ==========================================
+          Description: {{ test_description }}
+          Namespace: {{ test_namespace }}
+          ComputeInstance ID: {{ test_compute_instance_id }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          ==========================================
+      tags:
+        - info
+
+    - name: Execute ComputeInstance restart test
+      block:
+        - name: Create ComputeInstance for restart testing
+          ansible.builtin.include_role:
+            name: test_compute_instance_creation
+          vars:
+            compute_instance_template: osac.templates.ocp_virt_vm
+          tags:
+            - test
+            - creation
+
+        - name: Run ComputeInstance restart test
+          ansible.builtin.include_role:
+            name: test_compute_instance_restart
+          tags:
+            - test
+            - restart
+
+      rescue:
+        - name: Log test failure
+          ansible.builtin.lineinfile:
+            path: "{{ testing_workspace }}/test-execution.log"
+            line: "[{{ ansible_date_time.iso8601 }}] FAILED: ComputeInstance restart test failed"
+            create: true
+            mode: "0644"
+
+        - name: Re-raise the error
+          ansible.builtin.fail:
+            msg: ComputeInstance restart test failed
+
+      always:
+        - name: Execute ComputeInstance cleanup
+          ansible.builtin.include_role:
+            name: test_compute_instance_creation
+            tasks_from: delete_compute_instance
+          vars:
+            compute_instance_id: "{{ compute_instance_order_uuid }}"
+          tags:
+            - cleanup
+          when: compute_instance_order_uuid is defined
