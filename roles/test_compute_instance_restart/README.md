@@ -4,14 +4,13 @@ Ansible role for testing ComputeInstance restart functionality in OSAC.
 
 ## Overview
 
-This role tests the VM restart feature (MGMT-22682) by:
+This role tests the VM restart feature ([MGMT-22682](https://issues.redhat.com/browse/MGMT-22682)) by:
 1. Waiting for a ComputeInstance to reach Ready state
 2. Recording the original VirtualMachineInstance (VMI) creation timestamp
 3. Triggering a restart via the fulfillment-service API
 4. Verifying the restart completed successfully:
-   - `status.lastRestartedAt` is updated
-   - `RestartInProgress` condition is set
-   - A new VMI is created (with newer timestamp)
+   - `status.lastRestartedAt` is updated to match the restart request timestamp
+   - A new VMI is created (with newer timestamp than the original)
    - No `RestartFailed` condition exists
 
 ## Requirements
@@ -65,20 +64,24 @@ ansible-playbook playbooks/test_compute_instance_restart.yml -e test_namespace=v
 The role performs these verification steps:
 
 1. **Ready State**: Waits for ComputeInstance to reach `Ready` phase
-2. **Original VMI**: Records the current VMI creation timestamp
-3. **Restart Trigger**: Updates `spec.restartRequestedAt` via gRPC API
-4. **Status Update**: Verifies `status.lastRestartedAt` is set
-5. **Condition Check**: Verifies `RestartInProgress` condition is `True`
-6. **New VMI**: Verifies a new VMI is created with a newer timestamp
-7. **Failure Check**: Verifies no `RestartFailed` condition exists
+2. **Initial State Capture**: Records the initial `lastRestartedAt` value (may be empty) and original VMI creation timestamp
+3. **Restart Trigger**: Updates `spec.restartRequestedAt` via gRPC API with current timestamp
+4. **Status Update Verification**: Verifies `status.lastRestartedAt` is updated and:
+   - Is not empty
+   - Is different from the initial value
+   - Is greater than or equal to the restart request timestamp
+5. **VMI Recreation**: Verifies a new VMI is created with a creation timestamp newer than the original VMI
+6. **Failure Check**: Verifies no `RestartFailed` condition exists
 
 ## How It Works
 
 ### Restart Mechanism
 The cloudkit-operator detects when `spec.restartRequestedAt` is set and newer than `status.lastRestartedAt`. When detected:
-1. Controller deletes the VirtualMachineInstance
-2. KubeVirt automatically recreates the VMI (restart)
-3. Controller updates `status.lastRestartedAt` and sets `RestartInProgress` condition
+1. Controller sets `RestartInProgress` condition
+2. Controller deletes the VirtualMachineInstance
+3. KubeVirt automatically recreates the VMI (restart)
+4. Controller detects new VMI creation and updates `status.lastRestartedAt` to match the restart request timestamp
+5. Restart conditions are cleared once restart completes successfully
 
 ### gRPC API Call
 The role uses `grpcurl` to call the fulfillment-service API:
@@ -119,5 +122,5 @@ When used via the playbook:
 ## Related
 
 - Playbook: `playbooks/test_compute_instance_restart.yml`
-- GitHub Issue: MGMT-22682
+- Jira: [MGMT-22682](https://issues.redhat.com/browse/MGMT-22682)
 - cloudkit-operator PR: https://github.com/osac-project/osac-operator/pull/100

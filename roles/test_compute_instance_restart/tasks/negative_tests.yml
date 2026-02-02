@@ -1,0 +1,59 @@
+---
+# Negative test scenarios for ComputeInstance restart functionality
+# Tests error handling, edge cases, and invalid inputs
+# Prerequisites: main.yml has already run (ComputeInstance created, at least one restart completed)
+
+# Test 1: Timestamp in the past (should be ignored by operator)
+- name: Test restart request with timestamp in the past
+  block:
+    - name: Get current lastRestartedAt value
+      ansible.builtin.shell:
+        cmd: >
+          kubectl --as system:admin get computeinstance {{ compute_instance_name }}
+          -n {{ test_namespace }}
+          -o jsonpath='{.status.lastRestartedAt}'
+      register: current_last_restarted_check
+      changed_when: false
+
+    - name: Save current lastRestartedAt for comparison
+      ansible.builtin.set_fact:
+        saved_last_restarted: "{{ current_last_restarted_check.stdout }}"
+
+    - name: Attempt restart with timestamp in the past
+      ansible.builtin.shell:
+        cmd: |
+          grpcurl -insecure \
+            -H "Authorization: Bearer {{ fulfillment_cli_base_grpc_token_result.stdout }}" \
+            -d '{"object": {"id": "{{ compute_instance_order_uuid }}", "spec": {"template": "{{ compute_instance_template }}", "restart_requested_at": "2020-01-01T00:00:00Z"}}, "updateMask": {"paths": ["spec.restart_requested_at"]}}' \
+            {{ fulfillment_address }} \
+            fulfillment.v1.ComputeInstances/Update
+      changed_when: false
+
+    - name: Wait for potential operator action
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Verify lastRestartedAt unchanged
+      ansible.builtin.shell:
+        cmd: >
+          kubectl --as system:admin get computeinstance {{ compute_instance_name }}
+          -n {{ test_namespace }}
+          -o jsonpath='{.status.lastRestartedAt}'
+      register: past_timestamp_check
+      changed_when: false
+
+    - name: Assert lastRestartedAt was not updated
+      ansible.builtin.assert:
+        that:
+          - past_timestamp_check.stdout == saved_last_restarted
+        fail_msg: "Operator incorrectly processed past timestamp: {{ past_timestamp_check.stdout }} != {{ saved_last_restarted }}"
+        success_msg: "Past timestamp correctly ignored by operator (idempotent behavior)"
+
+  rescue:
+    - name: Log test failure for past timestamp test
+      ansible.builtin.debug:
+        msg: "FAILED: Past timestamp test - operator should ignore timestamps < lastRestartedAt"
+
+    - name: Re-raise the error
+      ansible.builtin.fail:
+        msg: Past timestamp test failed
