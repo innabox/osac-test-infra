@@ -83,7 +83,7 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o yaml | grep -E 'provisionJobID:|provisionJobState:|deprovisionJobID:|deprovisionJobState:|phase:' || echo ""
+              -o jsonpath='{.status.provisionJob.id},{.status.provisionJob.state},{.status.deprovisionJob.id},{.status.deprovisionJob.state},{.status.phase}'
           register: provision_status_before
           changed_when: false
           tags:
@@ -92,11 +92,11 @@
 
         - name: Parse provision status before deletion
           ansible.builtin.set_fact:
-            before_prov_job_id: "{{ provision_status_before.stdout | regex_search('provisionJobID: \"?([^\"\\n]+)\"?', '\\1') | default([''], true) | first }}"
-            before_prov_state: "{{ provision_status_before.stdout | regex_search('provisionJobState: ([^\\n]+)', '\\1') | default([''], true) | first }}"
-            before_deprov_job_id: "{{ provision_status_before.stdout | regex_search('deprovisionJobID: \"?([^\"\\n]+)\"?', '\\1') | default([''], true) | first }}"
-            before_deprov_state: "{{ provision_status_before.stdout | regex_search('deprovisionJobState: ([^\\n]+)', '\\1') | default([''], true) | first }}"
-            before_phase: "{{ provision_status_before.stdout | regex_search('phase: ([^\\n]+)', '\\1') | default([''], true) | first }}"
+            before_prov_job_id: "{{ provision_status_before.stdout.split(',')[0] }}"
+            before_prov_state: "{{ provision_status_before.stdout.split(',')[1] }}"
+            before_deprov_job_id: "{{ provision_status_before.stdout.split(',')[2] }}"
+            before_deprov_state: "{{ provision_status_before.stdout.split(',')[3] }}"
+            before_phase: "{{ provision_status_before.stdout.split(',')[4] }}"
           tags:
             - test
 
@@ -142,7 +142,7 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.provisionJobState}' 2>/dev/null || echo ""
+              -o jsonpath='{.status.provisionJob.state}' 2>/dev/null || echo ""
           register: provision_state_poll
           changed_when: false
           until: provision_state_poll.stdout in ['Canceled', 'Failed', 'Succeeded']
@@ -157,7 +157,7 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.provisionJobID},{.status.provisionJobState}' 2>/dev/null || echo ","
+              -o jsonpath='{.status.provisionJob.id},{.status.provisionJob.state}' 2>/dev/null || echo ","
           register: provision_after_cancel
           changed_when: false
           tags:
@@ -192,7 +192,7 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.deprovisionJobID},{.status.deprovisionJobState}' 2>/dev/null || echo ","
+              -o jsonpath='{.status.deprovisionJob.id},{.status.deprovisionJob.state}' 2>/dev/null || echo ","
           register: deprovision_poll
           changed_when: false
           until: >
@@ -234,7 +234,7 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.deprovisionJobID}' 2>/dev/null || echo ""
+              -o jsonpath='{.status.deprovisionJob.id}' 2>/dev/null || echo ""
           register: deprov_job_check
           changed_when: false
           retries: 5
