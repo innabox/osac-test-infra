@@ -59,7 +59,7 @@
   register: cr_deletion_poll
   changed_when: false
   failed_when: false
-  until: "'NotFound' in cr_deletion_poll.stderr or 'not found' in cr_deletion_poll.stderr"
+  until: "'NotFound' in cr_deletion_poll.stdout or 'not found' in cr_deletion_poll.stdout"
   retries: 60
   delay: 3
 
