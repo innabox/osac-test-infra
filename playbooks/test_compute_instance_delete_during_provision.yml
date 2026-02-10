@@ -278,8 +278,8 @@
 
         - name: Parse deprovision job details
           ansible.builtin.set_fact:
-            deprov_job_id: "{{ deprovision_poll.stdout.split(',')[0] }}"
-            deprov_state: "{{ deprovision_poll.stdout.split(',')[1] }}"
+            deprov_job_id: "{{ deprovision_poll.stdout.split(',')[0] if deprovision_poll.stdout is defined else '' }}"
+            deprov_state: "{{ deprovision_poll.stdout.split(',')[1] if deprovision_poll.stdout is defined else '' }}"
           tags:
             - test
 
