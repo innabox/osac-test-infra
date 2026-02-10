@@ -78,6 +78,29 @@
           tags:
             - test
 
+        - name: Detect current provider (AAP or EDA)
+          ansible.builtin.shell:
+            cmd: >
+              kubectl --as system:admin get deployment/cloudkit-operator-controller-manager
+              -n {{ test_namespace }}
+              -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CLOUDKIT_PROVISIONING_PROVIDER")].value}'
+          register: provider_detection
+          changed_when: false
+          tags:
+            - test
+
+        - name: Set provider variable
+          ansible.builtin.set_fact:
+            current_provider: "{{ provider_detection.stdout | default('aap') }}"
+          tags:
+            - test
+
+        - name: Display current provider
+          ansible.builtin.debug:
+            msg: "Current provider: {{ current_provider }}"
+          tags:
+            - test
+
         - name: Check provision job status before deletion
           ansible.builtin.shell:
             cmd: >
@@ -136,8 +159,8 @@
           tags:
             - test
 
-        # Step 1: Wait for provision job to be canceled
-        - name: Poll for provision job to reach terminal state (Canceled)
+        # Step 1: Provider-specific validation after deletion
+        - name: "[AAP] Wait for provision job to be canceled"
           ansible.builtin.shell:
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
@@ -148,46 +171,59 @@
           until: provision_state_poll.stdout in ['Canceled', 'Failed', 'Succeeded']
           retries: 30
           delay: 3
+          when: current_provider == 'aap'
           tags:
             - test
             - validation
 
-        - name: Get provision job details after cancellation
+        - name: Get provision job details after deletion
           ansible.builtin.shell:
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o jsonpath='{.status.provisionJob.id},{.status.provisionJob.state}' 2>/dev/null || echo ","
-          register: provision_after_cancel
+          register: provision_after_deletion
           changed_when: false
           tags:
             - test
 
-        - name: Parse provision job after cancellation
+        - name: Parse provision job after deletion
           ansible.builtin.set_fact:
-            canceled_prov_job_id: "{{ provision_after_cancel.stdout.split(',')[0] }}"
-            canceled_prov_state: "{{ provision_after_cancel.stdout.split(',')[1] }}"
+            after_prov_job_id: "{{ provision_after_deletion.stdout.split(',')[0] }}"
+            after_prov_state: "{{ provision_after_deletion.stdout.split(',')[1] }}"
           tags:
             - test
 
-        - name: Display provision job after cancellation
+        - name: Display provision job after deletion
           ansible.builtin.debug:
-            msg: "AFTER CANCELLATION - Provision: JobID={{ canceled_prov_job_id }}, State={{ canceled_prov_state }}"
+            msg: "AFTER DELETION [{{ current_provider }}] - Provision: JobID={{ after_prov_job_id }}, State={{ after_prov_state }}"
           tags:
             - test
 
-        - name: Verify provision job was canceled
+        - name: "[AAP] Verify provision job was canceled"
           ansible.builtin.assert:
             that:
-              - canceled_prov_state in ['Canceled', 'Failed', 'Succeeded']
-            fail_msg: "VALIDATION FAILED: Provision job not in terminal state: {{ canceled_prov_state }}"
-            success_msg: "VALIDATION PASSED: Provision job reached terminal state ({{ canceled_prov_state }})"
+              - after_prov_state in ['Canceled', 'Failed', 'Succeeded']
+            fail_msg: "VALIDATION FAILED [AAP]: Provision job not in terminal state: {{ after_prov_state }}"
+            success_msg: "VALIDATION PASSED [AAP]: Provision job canceled ({{ after_prov_state }})"
+          when: current_provider == 'aap'
           tags:
             - test
             - validation
 
-        # Step 2: Wait for deprovision job to appear and be Running
-        - name: Poll for deprovision job to start
+        - name: "[EDA] Verify provision job state is Unknown"
+          ansible.builtin.assert:
+            that:
+              - after_prov_state == 'Unknown'
+            fail_msg: "VALIDATION FAILED [EDA]: Expected provision=Unknown, got: {{ after_prov_state }}"
+            success_msg: "VALIDATION PASSED [EDA]: Provision job state is Unknown"
+          when: current_provider == 'eda'
+          tags:
+            - test
+            - validation
+
+        # Step 2: Wait for deprovision job to appear and be Running (behavior differs by provider)
+        - name: "[AAP] Poll for deprovision job to start (after provision cancellation)"
           ansible.builtin.shell:
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
@@ -200,9 +236,22 @@
             deprovision_poll.stdout.split(',')[1] in ['Pending', 'Running']
           retries: 30
           delay: 3
+          when: current_provider == 'aap'
           tags:
             - test
             - validation
+
+        - name: "[EDA] Get deprovision job (should already exist)"
+          ansible.builtin.shell:
+            cmd: >
+              kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
+              -n {{ test_namespace }}
+              -o jsonpath='{.status.deprovisionJob.id},{.status.deprovisionJob.state}' 2>/dev/null || echo ","
+          register: deprovision_poll
+          changed_when: false
+          when: current_provider == 'eda'
+          tags:
+            - test
 
         - name: Parse deprovision job details
           ansible.builtin.set_fact:
@@ -211,25 +260,26 @@
           tags:
             - test
 
-        - name: Display deprovision job started
+        - name: Display deprovision job status
           ansible.builtin.debug:
-            msg: "DEPROVISION STARTED - JobID={{ deprov_job_id }}, State={{ deprov_state }}"
+            msg: "DEPROVISION JOB [{{ current_provider }}] - JobID={{ deprov_job_id }}, State={{ deprov_state }}"
           tags:
             - test
 
-        - name: Verify deprovision job started
+        - name: "[AAP] Verify deprovision job started"
           ansible.builtin.assert:
             that:
               - deprov_job_id != ""
               - deprov_state in ['Pending', 'Running']
-            fail_msg: "VALIDATION FAILED: Deprovision job not running: JobID={{ deprov_job_id }}, State={{ deprov_state }}"
-            success_msg: "VALIDATION PASSED: Deprovision job started ({{ deprov_state }})"
+            fail_msg: "VALIDATION FAILED [AAP]: Deprovision job not running: JobID={{ deprov_job_id }}, State={{ deprov_state }}"
+            success_msg: "VALIDATION PASSED [AAP]: Deprovision job started ({{ deprov_state }})"
+          when: current_provider == 'aap'
           tags:
             - test
             - validation
 
-        # Step 3: Verify no duplicate deprovision jobs (poll and ensure job ID stays the same)
-        - name: Poll to ensure single deprovision job (no duplicates)
+        # Step 3: Verify no duplicate deprovision jobs (AAP only, since EDA has webhook-based deprovisioning)
+        - name: "[AAP] Poll to ensure single deprovision job (no duplicates)"
           ansible.builtin.shell:
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
@@ -239,16 +289,18 @@
           changed_when: false
           retries: 5
           delay: 2
+          when: current_provider == 'aap'
           tags:
             - test
             - validation
 
-        - name: Verify deprovision job ID remained consistent (no duplicates)
+        - name: "[AAP] Verify deprovision job ID remained consistent (no duplicates)"
           ansible.builtin.assert:
             that:
               - deprov_job_check.stdout == deprov_job_id
-            fail_msg: "VALIDATION FAILED: Deprovision job ID changed! Original={{ deprov_job_id }}, Current={{ deprov_job_check.stdout }}"
-            success_msg: "VALIDATION PASSED: Single deprovision job ({{ deprov_job_id }}) - no duplicates"
+            fail_msg: "VALIDATION FAILED [AAP]: Deprovision job ID changed! Original={{ deprov_job_id }}, Current={{ deprov_job_check.stdout }}"
+            success_msg: "VALIDATION PASSED [AAP]: Single deprovision job ({{ deprov_job_id }}) - no duplicates"
+          when: current_provider == 'aap'
           tags:
             - test
             - validation
@@ -329,7 +381,7 @@
           ansible.builtin.lineinfile:
             path: "{{ testing_workspace }}/test-execution.log"
             line: |
-              [{{ ansible_date_time.iso8601 }}] SUCCESS: ComputeInstance {{ compute_instance_order_uuid }} - provision canceled ({{ canceled_prov_state }}), deprovision job {{ deprov_job_id }}, no orphans
+              [{{ ansible_date_time.iso8601 }}] SUCCESS [{{ current_provider }}]: ComputeInstance {{ compute_instance_order_uuid }} - provision state ({{ after_prov_state }}), deprovision job {{ deprov_job_id }}, no orphans
             create: true
             mode: "0644"
           tags:
