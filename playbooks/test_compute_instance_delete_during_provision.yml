@@ -252,11 +252,11 @@
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o jsonpath='{.status.deprovisionJob.id},{.status.deprovisionJob.state}' 2>/dev/null || echo ","
-          register: deprovision_poll
+          register: aap_deprovision_poll
           changed_when: false
           until: >
-            deprovision_poll.stdout.split(',')[0] != '' and
-            deprovision_poll.stdout.split(',')[1] in ['Pending', 'Running']
+            aap_deprovision_poll.stdout.split(',')[0] != '' and
+            aap_deprovision_poll.stdout.split(',')[1] in ['Pending', 'Running']
           retries: 60
           delay: 1
           when: current_provider == 'aap'
@@ -270,7 +270,7 @@
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o jsonpath='{.status.deprovisionJob.id},{.status.deprovisionJob.state}' 2>/dev/null || echo ","
-          register: deprovision_poll
+          register: eda_deprovision_poll
           changed_when: false
           when: current_provider == 'eda'
           tags:
@@ -278,8 +278,8 @@
 
         - name: Parse deprovision job details
           ansible.builtin.set_fact:
-            deprov_job_id: "{{ deprovision_poll.stdout.split(',')[0] if deprovision_poll.stdout is defined else '' }}"
-            deprov_state: "{{ deprovision_poll.stdout.split(',')[1] if deprovision_poll.stdout is defined else '' }}"
+            deprov_job_id: "{{ (aap_deprovision_poll.stdout if current_provider == 'aap' else eda_deprovision_poll.stdout).split(',')[0] }}"
+            deprov_state: "{{ (aap_deprovision_poll.stdout if current_provider == 'aap' else eda_deprovision_poll.stdout).split(',')[1] }}"
           tags:
             - test
 
