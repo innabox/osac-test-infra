@@ -183,7 +183,7 @@
             - test
 
         # Step 1: Provider-specific validation after deletion (only if CR still exists)
-        - name: "[AAP] Wait for provision job to be canceled or CR deleted"
+        - name: "[AAP] Wait for provision job to terminate"
           ansible.builtin.shell:
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
@@ -223,12 +223,12 @@
           tags:
             - test
 
-        - name: "[AAP] Verify provision job was canceled or CR deleted"
+        - name: "[AAP] Verify provision job terminated"
           ansible.builtin.assert:
             that:
               - after_prov_state in ['Canceled', 'Failed', 'Succeeded', 'CR_DELETED', '']
             fail_msg: "VALIDATION FAILED [AAP]: Unexpected provision state: {{ after_prov_state }}"
-            success_msg: "VALIDATION PASSED [AAP]: Provision handled correctly ({{ after_prov_state }})"
+            success_msg: "VALIDATION PASSED [AAP]: Provision job terminated ({{ after_prov_state }})"
           when: current_provider == 'aap'
           tags:
             - test
