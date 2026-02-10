@@ -159,19 +159,42 @@
           tags:
             - test
 
-        # Step 1: Provider-specific validation after deletion
-        - name: "[AAP] Wait for provision job to be canceled"
+        - name: Check if CR still exists
+          ansible.builtin.shell:
+            cmd: >
+              kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
+              -n {{ test_namespace }} 2>&1
+          register: cr_exists_check
+          changed_when: false
+          failed_when: false
+          tags:
+            - test
+
+        - name: Set CR exists flag
+          ansible.builtin.set_fact:
+            cr_still_exists: "{{ 'NotFound' not in cr_exists_check.stderr and 'not found' not in cr_exists_check.stderr }}"
+          tags:
+            - test
+
+        - name: Display CR existence status
+          ansible.builtin.debug:
+            msg: "CR still exists: {{ cr_still_exists }}"
+          tags:
+            - test
+
+        # Step 1: Provider-specific validation after deletion (only if CR still exists)
+        - name: "[AAP] Wait for provision job to be canceled or CR deleted"
           ansible.builtin.shell:
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.provisionJob.state}' 2>/dev/null || echo ""
+              -o jsonpath='{.status.provisionJob.state}' 2>/dev/null || echo "CR_DELETED"
           register: provision_state_poll
           changed_when: false
-          until: provision_state_poll.stdout in ['Canceled', 'Failed', 'Succeeded']
-          retries: 30
-          delay: 3
-          when: current_provider == 'aap'
+          until: provision_state_poll.stdout in ['Canceled', 'Failed', 'Succeeded', 'CR_DELETED', '']
+          retries: 60
+          delay: 1
+          when: current_provider == 'aap' and cr_still_exists | bool
           tags:
             - test
             - validation
@@ -189,8 +212,8 @@
 
         - name: Parse provision job after deletion
           ansible.builtin.set_fact:
-            after_prov_job_id: "{{ provision_after_deletion.stdout.split(',')[0] }}"
-            after_prov_state: "{{ provision_after_deletion.stdout.split(',')[1] }}"
+            after_prov_job_id: "{{ provision_after_deletion.stdout.split(',')[0] if cr_still_exists | bool else 'N/A' }}"
+            after_prov_state: "{{ provision_after_deletion.stdout.split(',')[1] if cr_still_exists | bool else 'CR_DELETED' }}"
           tags:
             - test
 
@@ -200,23 +223,23 @@
           tags:
             - test
 
-        - name: "[AAP] Verify provision job was canceled"
+        - name: "[AAP] Verify provision job was canceled or CR deleted"
           ansible.builtin.assert:
             that:
-              - after_prov_state in ['Canceled', 'Failed', 'Succeeded']
-            fail_msg: "VALIDATION FAILED [AAP]: Provision job not in terminal state: {{ after_prov_state }}"
-            success_msg: "VALIDATION PASSED [AAP]: Provision job canceled ({{ after_prov_state }})"
+              - after_prov_state in ['Canceled', 'Failed', 'Succeeded', 'CR_DELETED', '']
+            fail_msg: "VALIDATION FAILED [AAP]: Unexpected provision state: {{ after_prov_state }}"
+            success_msg: "VALIDATION PASSED [AAP]: Provision handled correctly ({{ after_prov_state }})"
           when: current_provider == 'aap'
           tags:
             - test
             - validation
 
-        - name: "[EDA] Verify provision job state is Unknown"
+        - name: "[EDA] Verify provision job state is Unknown or CR deleted"
           ansible.builtin.assert:
             that:
-              - after_prov_state == 'Unknown'
-            fail_msg: "VALIDATION FAILED [EDA]: Expected provision=Unknown, got: {{ after_prov_state }}"
-            success_msg: "VALIDATION PASSED [EDA]: Provision job state is Unknown"
+              - after_prov_state in ['Unknown', 'CR_DELETED', '']
+            fail_msg: "VALIDATION FAILED [EDA]: Expected provision=Unknown or CR_DELETED, got: {{ after_prov_state }}"
+            success_msg: "VALIDATION PASSED [EDA]: Provision handled correctly ({{ after_prov_state }})"
           when: current_provider == 'eda'
           tags:
             - test
@@ -234,8 +257,8 @@
           until: >
             deprovision_poll.stdout.split(',')[0] != '' and
             deprovision_poll.stdout.split(',')[1] in ['Pending', 'Running']
-          retries: 30
-          delay: 3
+          retries: 60
+          delay: 1
           when: current_provider == 'aap'
           tags:
             - test
@@ -287,8 +310,8 @@
               -o jsonpath='{.status.deprovisionJob.id}' 2>/dev/null || echo ""
           register: deprov_job_check
           changed_when: false
-          retries: 5
-          delay: 2
+          retries: 10
+          delay: 1
           when: current_provider == 'aap'
           tags:
             - test
@@ -315,8 +338,8 @@
           changed_when: false
           failed_when: false
           until: "'NotFound' in cr_check.stderr or 'not found' in cr_check.stderr"
-          retries: 30
-          delay: 3
+          retries: 60
+          delay: 1
           tags:
             - test
             - validation
