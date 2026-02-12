@@ -104,6 +104,7 @@
         - name: Check provision job status before deletion
           ansible.builtin.shell:
             cmd: >
+              set -o pipefail;
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o json | jq -r '
@@ -192,6 +193,7 @@
         - name: "[AAP] Wait for provision job to terminate"
           ansible.builtin.shell:
             cmd: >
+              set -o pipefail;
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o json 2>/dev/null | jq -r '
@@ -212,6 +214,7 @@
         - name: Get provision job details after deletion
           ansible.builtin.shell:
             cmd: >
+              set -o pipefail;
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o json 2>/dev/null | jq -r '
@@ -262,6 +265,7 @@
         - name: "[AAP] Poll for deprovision job to start (after provision cancellation)"
           ansible.builtin.shell:
             cmd: >
+              set -o pipefail;
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o json 2>/dev/null | jq -r '
@@ -283,6 +287,7 @@
         - name: "[EDA] Get deprovision job (should already exist)"
           ansible.builtin.shell:
             cmd: >
+              set -o pipefail;
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o json 2>/dev/null | jq -r '
@@ -324,6 +329,7 @@
         - name: "[AAP] Poll to ensure single deprovision job (no duplicates)"
           ansible.builtin.shell:
             cmd: >
+              set -o pipefail;
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
               -o json 2>/dev/null | jq -r '
