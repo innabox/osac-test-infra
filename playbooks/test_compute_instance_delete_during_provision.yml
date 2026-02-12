@@ -106,7 +106,13 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.provisionJob.id},{.status.provisionJob.state},{.status.deprovisionJob.id},{.status.deprovisionJob.state},{.status.phase}'
+              -o json | jq -r '
+                (.status.jobs // [] | map(select(.type == "provision")) | sort_by(.timestamp) | reverse | first | .jobID // ""),
+                (.status.jobs // [] | map(select(.type == "provision")) | sort_by(.timestamp) | reverse | first | .state // ""),
+                (.status.jobs // [] | map(select(.type == "deprovision")) | sort_by(.timestamp) | reverse | first | .jobID // ""),
+                (.status.jobs // [] | map(select(.type == "deprovision")) | sort_by(.timestamp) | reverse | first | .state // ""),
+                (.status.phase // "")
+              ' | paste -sd ',' -
           register: provision_status_before
           changed_when: false
           tags:
@@ -188,7 +194,11 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.provisionJob.state}' 2>/dev/null || echo "CR_DELETED"
+              -o json 2>/dev/null | jq -r '
+                .status.jobs // [] |
+                map(select(.type == "provision")) |
+                sort_by(.timestamp) | reverse | first | .state // ""
+              ' || echo "CR_DELETED"
           register: provision_state_poll
           changed_when: false
           until: provision_state_poll.stdout in ['Canceled', 'Failed', 'Succeeded', 'CR_DELETED', '']
@@ -204,7 +214,10 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.provisionJob.id},{.status.provisionJob.state}' 2>/dev/null || echo ","
+              -o json 2>/dev/null | jq -r '
+                (.status.jobs // [] | map(select(.type == "provision")) | sort_by(.timestamp) | reverse | first | .jobID // ""),
+                (.status.jobs // [] | map(select(.type == "provision")) | sort_by(.timestamp) | reverse | first | .state // "")
+              ' | paste -sd ',' - || echo ","
           register: provision_after_deletion
           changed_when: false
           tags:
@@ -251,7 +264,10 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.deprovisionJob.id},{.status.deprovisionJob.state}' 2>/dev/null || echo ","
+              -o json 2>/dev/null | jq -r '
+                (.status.jobs // [] | map(select(.type == "deprovision")) | sort_by(.timestamp) | reverse | first | .jobID // ""),
+                (.status.jobs // [] | map(select(.type == "deprovision")) | sort_by(.timestamp) | reverse | first | .state // "")
+              ' | paste -sd ',' - || echo ","
           register: aap_deprovision_poll
           changed_when: false
           until: >
@@ -269,7 +285,10 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.deprovisionJob.id},{.status.deprovisionJob.state}' 2>/dev/null || echo ","
+              -o json 2>/dev/null | jq -r '
+                (.status.jobs // [] | map(select(.type == "deprovision")) | sort_by(.timestamp) | reverse | first | .jobID // ""),
+                (.status.jobs // [] | map(select(.type == "deprovision")) | sort_by(.timestamp) | reverse | first | .state // "")
+              ' | paste -sd ',' - || echo ","
           register: eda_deprovision_poll
           changed_when: false
           when: current_provider == 'eda'
@@ -307,7 +326,11 @@
             cmd: >
               kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
               -n {{ test_namespace }}
-              -o jsonpath='{.status.deprovisionJob.id}' 2>/dev/null || echo ""
+              -o json 2>/dev/null | jq -r '
+                .status.jobs // [] |
+                map(select(.type == "deprovision")) |
+                sort_by(.timestamp) | reverse | first | .jobID // ""
+              '
           register: deprov_job_check
           changed_when: false
           retries: 10
