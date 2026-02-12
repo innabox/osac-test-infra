@@ -50,6 +50,7 @@
 - name: Poll for provision job to appear
   ansible.builtin.shell:
     cmd: >
+      set -o pipefail;
       kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
       -n {{ test_namespace }}
       -o json 2>/dev/null | jq -r '
@@ -70,6 +71,7 @@
 - name: Poll for provision job to be Running
   ansible.builtin.shell:
     cmd: >
+      set -o pipefail;
       kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
       -n {{ test_namespace }}
       -o json 2>/dev/null | jq -r '
@@ -97,6 +99,7 @@
 - name: Poll for provision job to succeed
   ansible.builtin.shell:
     cmd: >
+      set -o pipefail;
       kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
       -n {{ test_namespace }}
       -o json 2>/dev/null | jq -r '
