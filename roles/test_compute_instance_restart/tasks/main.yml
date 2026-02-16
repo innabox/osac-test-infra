@@ -2,7 +2,7 @@
 # Main tasks for ComputeInstance restart testing
 # Prerequisites: ComputeInstance should already be created and compute_instance_order_uuid should be set
 
-- name: Wait for ComputeInstance to reach Ready phase
+- name: Wait for ComputeInstance to reach Running phase
   ansible.builtin.shell:
     cmd: >
       kubectl --as system:admin get computeinstance
@@ -10,7 +10,7 @@
       -l cloudkit.openshift.io/computeinstance-uuid={{ compute_instance_order_uuid }}
       -o jsonpath='{.items[0].status.phase}'
   register: ci_phase_check
-  until: ci_phase_check.stdout == "Ready"
+  until: ci_phase_check.stdout == "Running"
   retries: "{{ (compute_instance_ready_timeout / status_poll_interval) | int }}"
   delay: "{{ status_poll_interval }}"
   changed_when: false

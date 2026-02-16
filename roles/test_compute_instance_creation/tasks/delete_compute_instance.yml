@@ -7,8 +7,77 @@
   register: test_compute_instance_deletion_result
   changed_when: test_compute_instance_deletion_result.rc == 0
 
-# ComputeInstance deletion verification tasks
+- name: Display deletion initiated
+  ansible.builtin.debug:
+    msg: "Deletion initiated for ComputeInstance {{ compute_instance_order_uuid }}"
 
+# Job status verification - deprovision flow
+- name: Poll for deprovision job to appear
+  ansible.builtin.shell:
+    cmd: >
+      set -o pipefail;
+      kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
+      -n {{ test_namespace }}
+      -o json 2>/dev/null | jq -r '
+        .status.jobs // [] |
+        map(select(.type == "deprovision")) |
+        sort_by(.timestamp) | reverse | first | .jobID // ""
+      '
+  register: deprovision_job_poll
+  changed_when: false
+  until: deprovision_job_poll.stdout != ""
+  retries: 30
+  delay: 2
+
+- name: Display deprovision job ID
+  ansible.builtin.debug:
+    msg: "Deprovision job started: {{ deprovision_job_poll.stdout }}"
+
+- name: Poll for deprovision job to be Running
+  ansible.builtin.shell:
+    cmd: >
+      set -o pipefail;
+      kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
+      -n {{ test_namespace }}
+      -o json 2>/dev/null | jq -r '
+        .status.jobs // [] |
+        map(select(.type == "deprovision")) |
+        sort_by(.timestamp) | reverse | first | .state // ""
+      '
+  register: deprovision_state_poll
+  changed_when: false
+  until: deprovision_state_poll.stdout in ['Running', 'Succeeded']
+  retries: 30
+  delay: 2
+  when: not deprovision_job_poll.stdout.startswith('eda-webhook')
+
+- name: Display deprovision job running
+  ansible.builtin.debug:
+    msg: "Deprovision job state: {{ deprovision_state_poll.stdout }}"
+  when: not deprovision_job_poll.stdout.startswith('eda-webhook')
+
+- name: Skip deprovision job state polling for EDA provider
+  ansible.builtin.debug:
+    msg: "EDA provider detected (job ID: {{ deprovision_job_poll.stdout }}), skipping job state polling"
+  when: deprovision_job_poll.stdout.startswith('eda-webhook')
+
+- name: Poll for ComputeInstance CR to be deleted
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance {{ ci_name_result.stdout }}
+      -n {{ test_namespace }} 2>&1
+  register: cr_deletion_poll
+  changed_when: false
+  failed_when: false
+  until: "'NotFound' in cr_deletion_poll.stdout or 'not found' in cr_deletion_poll.stdout"
+  retries: 60
+  delay: 3
+
+- name: Display CR deletion confirmation
+  ansible.builtin.debug:
+    msg: "ComputeInstance CR {{ ci_name_result.stdout }} deleted from Kubernetes"
+
+# Verify deletion via gRPC
 - name: Verify ComputeInstance deletion via gRPC call
   ansible.builtin.command:
     cmd: >
@@ -32,4 +101,4 @@
 
 - name: Log ComputeInstance cleanup completion
   ansible.builtin.debug:
-    msg: "Successfully cleaned up test ComputeInstance {{ compute_instance_order_uuid }}"
+    msg: "Successfully cleaned up test ComputeInstance {{ compute_instance_order_uuid }}, deprovision job {{ deprovision_job_poll.stdout }}"
