@@ -4,6 +4,8 @@ kind: ComputeInstance
 metadata:
   name: {{ test_instance_name }}
   namespace: {{ test_namespace }}
+  annotations:
+    cloudkit.openshift.io/tenant: tenant-{{ test_namespace }}
 spec:
   templateID: cloudkit.templates.ocp_virt_vm
   image:
