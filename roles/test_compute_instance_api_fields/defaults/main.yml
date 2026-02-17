@@ -4,7 +4,7 @@
 
 # Test instance configuration
 # test_instance_name is generated in tasks/main.yml
-test_image_ref: "quay.io/fedora/fedora-coreos:stable"
+test_image_ref: "quay.io/containerdisks/fedora:latest"
 test_cores: 2
 test_memory_gib: 4
 test_boot_disk_size: 20
