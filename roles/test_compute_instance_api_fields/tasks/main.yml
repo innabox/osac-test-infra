@@ -1,44 +1,118 @@
 ---
 # Main tasks for ComputeInstance API fields testing
-# Tests runStrategy mutability and immutability of other fields
-# Prerequisites: ComputeInstance should already be created
-# Either compute_instance_order_uuid (for fulfillment-cli created) or compute_instance_name (for kubectl created) must be set
+# Creates a ComputeInstance using explicit API fields, tests runStrategy mutability and immutability
 
-- name: Get ComputeInstance name from UUID label
-  ansible.builtin.shell:
-    cmd: >
-      kubectl --as system:admin get computeinstance
-      -n {{ test_namespace }}
-      -l cloudkit.openshift.io/computeinstance-uuid={{ compute_instance_order_uuid }}
-      -o jsonpath='{.items[0].metadata.name}'
-  register: ci_name_result
-  changed_when: false
-  when: compute_instance_order_uuid is defined and compute_instance_name is not defined
-
-- name: Set ComputeInstance name fact from UUID lookup
-  ansible.builtin.set_fact:
-    compute_instance_name: "{{ ci_name_result.stdout }}"
-  when: compute_instance_order_uuid is defined and compute_instance_name is not defined
-
-- name: Use provided ComputeInstance name
-  ansible.builtin.set_fact:
-    compute_instance_name: "{{ compute_instance_name }}"
-  when: compute_instance_name is defined
-
-- name: Display test information
+- name: Display test configuration
   ansible.builtin.debug:
     msg: |
-      Testing ComputeInstance API Fields
-      ComputeInstance: {{ compute_instance_name }}
+      Creating test ComputeInstance with explicit API fields
+      Instance name: {{ test_instance_name }}
       Namespace: {{ test_namespace }}
-      Tests: runStrategy mutability, field immutability
+      Image: {{ test_image_ref }}
+      Cores: {{ test_cores }}
+      Memory: {{ test_memory_gib }} GiB
+      Boot disk: {{ test_boot_disk_size }} GiB
+
+- name: Create temporary directory for test manifests
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: osac-api-test-
+  register: temp_dir
+
+- name: Generate ComputeInstance manifest from template
+  ansible.builtin.template:
+    src: computeinstance.yml.j2
+    dest: "{{ temp_dir.path }}/computeinstance.yml"
+    mode: "0644"
+
+- name: Create ComputeInstance using explicit API fields
+  ansible.builtin.command:
+    cmd: kubectl --as system:admin apply -f {{ temp_dir.path }}/computeinstance.yml
+  register: create_result
+  changed_when: create_result.rc == 0
+
+- name: Display creation result
+  ansible.builtin.debug:
+    msg: "{{ create_result.stdout }}"
+
+- name: Wait for provision job to appear
+  ansible.builtin.shell:
+    cmd: >
+      set -o pipefail;
+      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      -n {{ test_namespace }}
+      -o json 2>/dev/null | jq -r '
+        .status.jobs // [] |
+        map(select(.type == "provision")) |
+        sort_by(.timestamp) | reverse | first | .jobID // ""
+      '
+  register: provision_job_poll
+  changed_when: false
+  until: provision_job_poll.stdout != ""
+  retries: 30
+  delay: 2
+
+- name: Display provision job ID
+  ansible.builtin.debug:
+    msg: "Provision job started: {{ provision_job_poll.stdout }}"
+
+- name: Wait for provision job to succeed
+  ansible.builtin.shell:
+    cmd: >
+      set -o pipefail;
+      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      -n {{ test_namespace }}
+      -o json 2>/dev/null | jq -r '
+        .status.jobs // [] |
+        map(select(.type == "provision")) |
+        sort_by(.timestamp) | reverse | first | .state // ""
+      '
+  register: provision_success_poll
+  changed_when: false
+  until: provision_success_poll.stdout == 'Succeeded'
+  retries: "{{ (provision_timeout / status_poll_interval) | int }}"
+  delay: "{{ status_poll_interval }}"
+  when: not provision_job_poll.stdout.startswith('eda-webhook')
+
+- name: Display provision job succeeded
+  ansible.builtin.debug:
+    msg: "Provision job succeeded"
+  when: not provision_job_poll.stdout.startswith('eda-webhook')
+
+- name: Wait for ComputeInstance to reach Running phase
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      -n {{ test_namespace }}
+      -o jsonpath='{.status.phase}' 2>/dev/null || echo ""
+  register: phase_poll
+  changed_when: false
+  until: phase_poll.stdout == 'Running'
+  retries: "{{ (provision_timeout / status_poll_interval) | int }}"
+  delay: "{{ status_poll_interval }}"
+
+- name: Verify ComputeInstance is Running
+  ansible.builtin.assert:
+    that:
+      - phase_poll.stdout == 'Running'
+    fail_msg: "ComputeInstance did not reach Running state, current: {{ phase_poll.stdout }}"
+    success_msg: "ComputeInstance reached Running state with explicit API fields"
+
+- name: Get VirtualMachine namespace
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      -n {{ test_namespace }}
+      -o jsonpath='{.status.virtualMachineReference.namespace}'
+  register: vm_namespace_result
+  changed_when: false
 
 - name: Test runStrategy - Change from Always to Halted
   block:
     - name: Get current runStrategy value
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get computeinstance {{ compute_instance_name }}
+          kubectl --as system:admin get computeinstance {{ test_instance_name }}
           -n {{ test_namespace }}
           -o jsonpath='{.spec.runStrategy}'
       register: initial_run_strategy
@@ -48,19 +122,10 @@
       ansible.builtin.debug:
         msg: "Initial runStrategy: {{ initial_run_strategy.stdout }}"
 
-    - name: Get VirtualMachine namespace
-      ansible.builtin.shell:
-        cmd: >
-          kubectl --as system:admin get computeinstance {{ compute_instance_name }}
-          -n {{ test_namespace }}
-          -o jsonpath='{.status.virtualMachineReference.namespace}'
-      register: vm_namespace_result
-      changed_when: false
-
     - name: Patch runStrategy to Halted
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ compute_instance_name }}
+          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"runStrategy":"Halted"}}'
@@ -70,7 +135,7 @@
     - name: Wait for VirtualMachine to stop
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get virtualmachine {{ compute_instance_name }}
+          kubectl --as system:admin get virtualmachine {{ test_instance_name }}
           -n {{ vm_namespace_result.stdout }}
           -o jsonpath='{.status.printableStatus}'
       register: vm_status_check
@@ -82,7 +147,7 @@
     - name: Verify VirtualMachine spec.running is false
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get virtualmachine {{ compute_instance_name }}
+          kubectl --as system:admin get virtualmachine {{ test_instance_name }}
           -n {{ vm_namespace_result.stdout }}
           -o jsonpath='{.spec.running}'
       register: vm_running_check
@@ -102,7 +167,7 @@
     - name: Verify VirtualMachineInstance is terminated
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get virtualmachineinstance {{ compute_instance_name }}
+          kubectl --as system:admin get virtualmachineinstance {{ test_instance_name }}
           -n {{ vm_namespace_result.stdout }}
           2>&1
       register: vmi_check
@@ -125,7 +190,7 @@
     - name: Patch runStrategy to Always
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ compute_instance_name }}
+          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"runStrategy":"Always"}}'
@@ -135,7 +200,7 @@
     - name: Wait for VirtualMachine to start
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get virtualmachine {{ compute_instance_name }}
+          kubectl --as system:admin get virtualmachine {{ test_instance_name }}
           -n {{ vm_namespace_result.stdout }}
           -o jsonpath='{.status.printableStatus}'
       register: vm_status_running_check
@@ -147,7 +212,7 @@
     - name: Verify VirtualMachine spec.running is true
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get virtualmachine {{ compute_instance_name }}
+          kubectl --as system:admin get virtualmachine {{ test_instance_name }}
           -n {{ vm_namespace_result.stdout }}
           -o jsonpath='{.spec.running}'
       register: vm_running_true_check
@@ -167,7 +232,7 @@
     - name: Wait for VirtualMachineInstance to be running
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get virtualmachineinstance {{ compute_instance_name }}
+          kubectl --as system:admin get virtualmachineinstance {{ test_instance_name }}
           -n {{ vm_namespace_result.stdout }}
           -o jsonpath='{.status.phase}'
       register: vmi_phase_check
@@ -192,7 +257,7 @@
     - name: Get current cores value
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get computeinstance {{ compute_instance_name }}
+          kubectl --as system:admin get computeinstance {{ test_instance_name }}
           -n {{ test_namespace }}
           -o jsonpath='{.spec.cores}'
       register: original_cores
@@ -201,7 +266,7 @@
     - name: Attempt to patch cores field
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ compute_instance_name }}
+          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"cores":8}}'
@@ -222,7 +287,7 @@
     - name: Attempt to patch memoryGiB field
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ compute_instance_name }}
+          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"memoryGiB":16}}'
@@ -243,7 +308,7 @@
     - name: Attempt to patch image field
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ compute_instance_name }}
+          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"image":{"sourceRef":"quay.io/fedora/fedora:latest"}}}'
@@ -259,11 +324,35 @@
         fail_msg: "Image field was allowed to change - immutability validation failed!"
         success_msg: "✓ Test PASSED: image field is immutable (patch rejected)"
 
+- name: Cleanup - Delete test ComputeInstance
+  ansible.builtin.command:
+    cmd: kubectl --as system:admin delete computeinstance {{ test_instance_name }} -n {{ test_namespace }}
+  register: delete_result
+  changed_when: delete_result.rc == 0
+  failed_when: false
+
+- name: Wait for ComputeInstance to be deleted
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      -n {{ test_namespace }} 2>&1
+  register: delete_check
+  changed_when: false
+  until: "'NotFound' in delete_check.stderr or delete_check.rc != 0"
+  retries: 60
+  delay: 5
+  failed_when: false
+
+- name: Remove temporary manifest directory
+  ansible.builtin.file:
+    path: "{{ temp_dir.path }}"
+    state: absent
+
 - name: Log successful API fields test completion
   ansible.builtin.lineinfile:
     path: "{{ testing_workspace }}/test-execution.log"
     line: |
-      [{{ ansible_date_time.iso8601 }}] SUCCESS: ComputeInstance {{ compute_instance_order_uuid }} API fields test completed
+      [{{ ansible_date_time.iso8601 }}] SUCCESS: ComputeInstance {{ test_instance_name }} API fields test completed
       - runStrategy mutability: PASSED (VM stopped and restarted)
       - cores immutability: PASSED (patch rejected)
       - memoryGiB immutability: PASSED (patch rejected)
@@ -277,13 +366,16 @@
       ========================================
       API Fields Test Summary
       ========================================
-      ComputeInstance: {{ compute_instance_name }}
+      ComputeInstance: {{ test_instance_name }}
 
+      ✓ Created with explicit API fields (not templateParameters)
+      ✓ Provisioned and reached Running state
       ✓ runStrategy Halted: VM stopped successfully
       ✓ runStrategy Always: VM started successfully
       ✓ cores immutability: Enforced
       ✓ memoryGiB immutability: Enforced
       ✓ image immutability: Enforced
+      ✓ Cleanup: ComputeInstance deleted
 
       All tests PASSED!
       ========================================

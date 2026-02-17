@@ -3,21 +3,12 @@
 # This playbook tests the new explicit API fields introduced in MGMT-23103
 #
 # Tests:
-# 1. runStrategy mutability - VM stop/start via runStrategy field
-# 2. Field immutability - cores, memoryGiB, image cannot be changed
+# 1. ComputeInstance creation using explicit API fields (image, cores, memoryGiB, bootDisk, runStrategy)
+# 2. runStrategy mutability - VM stop/start via runStrategy field
+# 3. Field immutability - cores, memoryGiB, image cannot be changed
 #
-# Prerequisites:
-# - ComputeInstance must already exist and be in Running state
-# - Either compute_instance_order_uuid (for fulfillment-cli created) OR compute_instance_name (for kubectl created) must be set
-#
-# Usage with UUID (fulfillment-cli created):
+# Usage:
 #   ansible-playbook playbooks/test_compute_instance_api_fields.yml \
-#     -e compute_instance_order_uuid=<UUID> \
-#     -e test_namespace=<NAMESPACE>
-#
-# Usage with name (kubectl created):
-#   ansible-playbook playbooks/test_compute_instance_api_fields.yml \
-#     -e compute_instance_name=<NAME> \
 #     -e test_namespace=<NAMESPACE>
 
 - name: OSAC ComputeInstance API Fields Test
@@ -26,7 +17,8 @@
   vars:
     test_name: ComputeInstance API Fields Test
     test_description: |
-      Test runStrategy mutability and field immutability (MGMT-23103)
+      Test explicit API fields (MGMT-23103)
+      - Create ComputeInstance with explicit fields (not templateParameters)
       - runStrategy: Stop and start VM
       - Immutability: cores, memoryGiB, image
   tasks:
@@ -36,73 +28,17 @@
           {{ test_name }}
           ==========================================
           Description: {{ test_description }}
-          ComputeInstance UUID: {{ compute_instance_order_uuid }}
           Namespace: {{ test_namespace }}
           Timestamp: {{ ansible_date_time.iso8601 }}
           ==========================================
 
-    - name: Validate prerequisites
-      block:
-        - name: Check either UUID or name is provided
-          ansible.builtin.assert:
-            that:
-              - (compute_instance_order_uuid is defined and compute_instance_order_uuid | length > 0) or
-                (compute_instance_name is defined and compute_instance_name | length > 0)
-            fail_msg: "Either compute_instance_order_uuid or compute_instance_name must be provided via -e flag"
-            success_msg: "ComputeInstance identifier provided"
-
-        - name: Check test_namespace is set
-          ansible.builtin.assert:
-            that:
-              - test_namespace is defined
-              - test_namespace | length > 0
-            fail_msg: "test_namespace must be provided via -e flag"
-            success_msg: "Target namespace: {{ test_namespace }}"
-
-        - name: Verify ComputeInstance exists by UUID
-          ansible.builtin.shell:
-            cmd: >
-              kubectl --as system:admin get computeinstance
-              -n {{ test_namespace }}
-              -l cloudkit.openshift.io/computeinstance-uuid={{ compute_instance_order_uuid }}
-              -o jsonpath='{.items[0].metadata.name}'
-          register: ci_exists_check
-          changed_when: false
-          when: compute_instance_order_uuid is defined
-
-        - name: Verify ComputeInstance exists by name
-          ansible.builtin.shell:
-            cmd: >
-              kubectl --as system:admin get computeinstance {{ compute_instance_name }}
-              -n {{ test_namespace }}
-              -o jsonpath='{.metadata.name}'
-          register: ci_name_check
-          changed_when: false
-          when: compute_instance_name is defined
-
-        - name: Assert ComputeInstance was found
-          ansible.builtin.assert:
-            that:
-              - (ci_exists_check.stdout | default('') | length > 0) or
-                (ci_name_check.stdout | default('') | length > 0)
-            fail_msg: "ComputeInstance not found"
-            success_msg: "Found ComputeInstance: {{ ci_exists_check.stdout | default(ci_name_check.stdout) }}"
-
-        - name: Set test instance name for status check
-          ansible.builtin.set_fact:
-            test_instance_name: "{{ ci_exists_check.stdout | default(compute_instance_name) }}"
-
-        - name: Wait for ComputeInstance to be in Running phase
-          ansible.builtin.shell:
-            cmd: >
-              kubectl --as system:admin get computeinstance {{ test_instance_name }}
-              -n {{ test_namespace }}
-              -o jsonpath='{.status.phase}'
-          register: ci_phase_check
-          until: ci_phase_check.stdout == "Running"
-          retries: 60
-          delay: 10
-          changed_when: false
+    - name: Validate test_namespace is set
+      ansible.builtin.assert:
+        that:
+          - test_namespace is defined
+          - test_namespace | length > 0
+        fail_msg: "test_namespace must be provided via -e flag"
+        success_msg: "Target namespace: {{ test_namespace }}"
 
     - name: Execute API fields tests
       block:

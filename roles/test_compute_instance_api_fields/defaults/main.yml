@@ -2,6 +2,14 @@
 # Default variables for ComputeInstance API fields testing
 # Variables are inherited from group_vars/all.yml unless overridden
 
+# Test instance configuration
+test_instance_name: "e2e-test-api-fields-{{ 99999999 | random | string }}"
+test_image_ref: "quay.io/fedora/fedora-coreos:stable"
+test_cores: 2
+test_memory_gib: 4
+test_boot_disk_size: 20
+
 # Polling and timeout settings
 status_poll_interval: 10  # seconds
 vm_state_change_timeout: 120  # seconds (2 minutes for VM to stop/start)
+provision_timeout: 600  # seconds (10 minutes for provisioning)

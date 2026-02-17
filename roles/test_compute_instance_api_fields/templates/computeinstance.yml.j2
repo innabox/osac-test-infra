@@ -1,0 +1,16 @@
+---
+apiVersion: cloudkit.openshift.io/v1alpha1
+kind: ComputeInstance
+metadata:
+  name: {{ test_instance_name }}
+  namespace: {{ test_namespace }}
+spec:
+  templateID: cloudkit.templates.ocp_virt_vm
+  image:
+    sourceType: registry
+    sourceRef: {{ test_image_ref }}
+  cores: {{ test_cores }}
+  memoryGiB: {{ test_memory_gib }}
+  bootDisk:
+    sizeGiB: {{ test_boot_disk_size }}
+  runStrategy: Always
