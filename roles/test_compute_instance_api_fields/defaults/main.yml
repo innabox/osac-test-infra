@@ -8,6 +8,7 @@ test_image_ref: "quay.io/containerdisks/fedora:latest"
 test_cores: 2
 test_memory_gib: 4
 test_boot_disk_size: 20
+test_ssh_key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDKw8test-e2e-key"
 
 # Polling and timeout settings
 status_poll_interval: 10  # seconds
