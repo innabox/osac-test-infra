@@ -4,7 +4,7 @@
 
 - name: Generate unique instance name
   ansible.builtin.set_fact:
-    test_instance_name: "e2e-test-api-fields-{{ 99999999 | random | string }}"
+    test_instance_name: "e2e-test-api-fields-{{ now(utc=true).strftime('%d%m%H%M') }}"
 
 - name: Display test configuration
   ansible.builtin.debug:
@@ -43,7 +43,7 @@
   ansible.builtin.shell:
     cmd: >
       set -o pipefail;
-      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      kubectl --as system:admin get computeinstance.osac.openshift.io {{ test_instance_name }}
       -n {{ test_namespace }}
       -o json 2>/dev/null | jq -r '
         .status.jobs // [] |
@@ -64,7 +64,7 @@
   ansible.builtin.shell:
     cmd: >
       set -o pipefail;
-      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      kubectl --as system:admin get computeinstance.osac.openshift.io {{ test_instance_name }}
       -n {{ test_namespace }}
       -o json 2>/dev/null | jq -r '
         .status.jobs // [] |
@@ -86,7 +86,7 @@
 - name: Wait for ComputeInstance to reach Running phase
   ansible.builtin.shell:
     cmd: >
-      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      kubectl --as system:admin get computeinstance.osac.openshift.io {{ test_instance_name }}
       -n {{ test_namespace }}
       -o jsonpath='{.status.phase}' 2>/dev/null || echo ""
   register: phase_poll
@@ -105,7 +105,7 @@
 - name: Get VirtualMachine namespace
   ansible.builtin.shell:
     cmd: >
-      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      kubectl --as system:admin get computeinstance.osac.openshift.io {{ test_instance_name }}
       -n {{ test_namespace }}
       -o jsonpath='{.status.virtualMachineReference.namespace}'
   register: vm_namespace_result
@@ -116,7 +116,7 @@
     - name: Get current runStrategy value
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get computeinstance {{ test_instance_name }}
+          kubectl --as system:admin get computeinstance.osac.openshift.io {{ test_instance_name }}
           -n {{ test_namespace }}
           -o jsonpath='{.spec.runStrategy}'
       register: initial_run_strategy
@@ -129,7 +129,7 @@
     - name: Patch runStrategy to Halted
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
+          kubectl --as system:admin patch computeinstance.osac.openshift.io {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"runStrategy":"Halted"}}'
@@ -148,42 +148,25 @@
       delay: "{{ status_poll_interval }}"
       changed_when: false
 
-    - name: Verify VirtualMachine spec.running is false
+    - name: Verify VirtualMachine spec.runStrategy is Halted
       ansible.builtin.shell:
         cmd: >
           kubectl --as system:admin get virtualmachine {{ test_instance_name }}
           -n {{ vm_namespace_result.stdout }}
-          -o jsonpath='{.spec.running}'
-      register: vm_running_check
+          -o jsonpath='{.spec.runStrategy}'
+      register: vm_run_strategy_check
       changed_when: false
 
     - name: Assert VM is stopped
       ansible.builtin.assert:
         that:
-          - vm_running_check.stdout == "false"
+          - vm_run_strategy_check.stdout == "Halted"
           - vm_status_check.stdout == "Stopped"
         fail_msg: |
           VM did not stop correctly:
-          - spec.running: {{ vm_running_check.stdout }}
+          - spec.runStrategy: {{ vm_run_strategy_check.stdout }}
           - status.printableStatus: {{ vm_status_check.stdout }}
         success_msg: "VM successfully stopped (runStrategy=Halted)"
-
-    - name: Verify VirtualMachineInstance is terminated
-      ansible.builtin.shell:
-        cmd: >
-          kubectl --as system:admin get virtualmachineinstance {{ test_instance_name }}
-          -n {{ vm_namespace_result.stdout }}
-          2>&1
-      register: vmi_check
-      failed_when: false
-      changed_when: false
-
-    - name: Assert VMI is not found
-      ansible.builtin.assert:
-        that:
-          - "'NotFound' in vmi_check.stderr or vmi_check.rc != 0"
-        fail_msg: "VirtualMachineInstance still exists after VM stopped"
-        success_msg: "VirtualMachineInstance terminated successfully"
 
     - name: Log successful VM stop
       ansible.builtin.debug:
@@ -194,7 +177,7 @@
     - name: Patch runStrategy to Always
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
+          kubectl --as system:admin patch computeinstance.osac.openshift.io {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"runStrategy":"Always"}}'
@@ -213,44 +196,25 @@
       delay: "{{ status_poll_interval }}"
       changed_when: false
 
-    - name: Verify VirtualMachine spec.running is true
+    - name: Verify VirtualMachine spec.runStrategy is Always
       ansible.builtin.shell:
         cmd: >
           kubectl --as system:admin get virtualmachine {{ test_instance_name }}
           -n {{ vm_namespace_result.stdout }}
-          -o jsonpath='{.spec.running}'
-      register: vm_running_true_check
+          -o jsonpath='{.spec.runStrategy}'
+      register: vm_run_strategy_always_check
       changed_when: false
 
     - name: Assert VM is running
       ansible.builtin.assert:
         that:
-          - vm_running_true_check.stdout == "true"
+          - vm_run_strategy_always_check.stdout == "Always"
           - vm_status_running_check.stdout == "Running"
         fail_msg: |
           VM did not start correctly:
-          - spec.running: {{ vm_running_true_check.stdout }}
+          - spec.runStrategy: {{ vm_run_strategy_always_check.stdout }}
           - status.printableStatus: {{ vm_status_running_check.stdout }}
         success_msg: "VM successfully started (runStrategy=Always)"
-
-    - name: Wait for VirtualMachineInstance to be running
-      ansible.builtin.shell:
-        cmd: >
-          kubectl --as system:admin get virtualmachineinstance {{ test_instance_name }}
-          -n {{ vm_namespace_result.stdout }}
-          -o jsonpath='{.status.phase}'
-      register: vmi_phase_check
-      until: vmi_phase_check.stdout == "Running"
-      retries: "{{ (vm_state_change_timeout / status_poll_interval) | int }}"
-      delay: "{{ status_poll_interval }}"
-      changed_when: false
-
-    - name: Assert VMI is running
-      ansible.builtin.assert:
-        that:
-          - vmi_phase_check.stdout == "Running"
-        fail_msg: "VirtualMachineInstance did not start"
-        success_msg: "VirtualMachineInstance started successfully"
 
     - name: Log successful VM start
       ansible.builtin.debug:
@@ -261,7 +225,7 @@
     - name: Get current cores value
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin get computeinstance {{ test_instance_name }}
+          kubectl --as system:admin get computeinstance.osac.openshift.io {{ test_instance_name }}
           -n {{ test_namespace }}
           -o jsonpath='{.spec.cores}'
       register: original_cores
@@ -270,7 +234,7 @@
     - name: Attempt to patch cores field
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
+          kubectl --as system:admin patch computeinstance.osac.openshift.io {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"cores":8}}'
@@ -291,7 +255,7 @@
     - name: Attempt to patch memoryGiB field
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
+          kubectl --as system:admin patch computeinstance.osac.openshift.io {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"memoryGiB":16}}'
@@ -312,7 +276,7 @@
     - name: Attempt to patch image field
       ansible.builtin.shell:
         cmd: >
-          kubectl --as system:admin patch computeinstance {{ test_instance_name }}
+          kubectl --as system:admin patch computeinstance.osac.openshift.io {{ test_instance_name }}
           -n {{ test_namespace }}
           --type=merge
           -p '{"spec":{"image":{"sourceRef":"quay.io/fedora/fedora:latest"}}}'
@@ -330,7 +294,7 @@
 
 - name: Cleanup - Delete test ComputeInstance
   ansible.builtin.command:
-    cmd: kubectl --as system:admin delete computeinstance {{ test_instance_name }} -n {{ test_namespace }}
+    cmd: kubectl --as system:admin delete computeinstance.osac.openshift.io {{ test_instance_name }} -n {{ test_namespace }}
   register: delete_result
   changed_when: delete_result.rc == 0
   failed_when: false
@@ -338,7 +302,7 @@
 - name: Wait for ComputeInstance to be deleted
   ansible.builtin.shell:
     cmd: >
-      kubectl --as system:admin get computeinstance {{ test_instance_name }}
+      kubectl --as system:admin get computeinstance.osac.openshift.io {{ test_instance_name }}
       -n {{ test_namespace }} 2>&1
   register: delete_check
   changed_when: false

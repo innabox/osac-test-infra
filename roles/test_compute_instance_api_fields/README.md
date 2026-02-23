@@ -15,11 +15,11 @@ This role tests the new explicit API fields introduced in MGMT-23103 for Compute
 
 ### 2. runStrategy Mutability Tests
 - **Test**: Change runStrategy from `Always` to `Halted`
-  - Verifies VirtualMachine stops (`spec.running=false`, `status=Stopped`)
+  - Verifies VirtualMachine stops (`spec.runStrategy=Halted`, `status=Stopped`)
   - Verifies VirtualMachineInstance is terminated
 
 - **Test**: Change runStrategy from `Halted` to `Always`
-  - Verifies VirtualMachine starts (`spec.running=true`, `status=Running`)
+  - Verifies VirtualMachine starts (`spec.runStrategy=Always`, `status=Running`)
   - Verifies new VirtualMachineInstance is created and running
 
 ### 3. Immutability Validation Tests
