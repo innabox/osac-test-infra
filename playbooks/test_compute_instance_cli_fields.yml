@@ -1,0 +1,58 @@
+---
+# E2E Test: ComputeInstance creation via fulfillment-cli with explicit spec fields
+#
+# Tests the full stack: CLI -> fulfillment-service -> operator -> provisioning
+# Verifies that explicit fields (cores, memoryGiB, image, bootDisk, runStrategy)
+# are correctly passed through the fulfillment API to the Kubernetes resource.
+#
+# Usage:
+#   ansible-playbook playbooks/test_compute_instance_cli_fields.yml
+#
+# Related:
+#   - MGMT-23103: https://issues.redhat.com/browse/MGMT-23103
+#   - CLI PR: https://github.com/osac-project/fulfillment-cli/pull/110
+
+- name: OSAC ComputeInstance CLI Explicit Fields Test
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    test_description: >-
+      Create ComputeInstance via fulfillment-cli with explicit spec fields
+      and verify they propagate to the Kubernetes resource.
+
+  tasks:
+    - name: Display test information
+      ansible.builtin.debug:
+        msg: |
+          ComputeInstance CLI Explicit Fields Test
+          ==========================================
+          Description: {{ test_description }}
+          Namespace: {{ test_namespace }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          ==========================================
+
+    - name: Validate test_namespace is set
+      ansible.builtin.assert:
+        that:
+          - test_namespace is defined
+          - test_namespace | length > 0
+        fail_msg: "test_namespace must be set"
+        success_msg: "Target namespace: {{ test_namespace }}"
+
+    - name: Run CLI explicit fields test
+      ansible.builtin.include_role:
+        name: test_compute_instance_cli_fields
+
+    - name: Test completion message
+      ansible.builtin.debug:
+        msg: |
+          ==========================================
+          CLI Explicit Fields Test COMPLETED
+          ==========================================
+          All tests passed successfully!
+
+          Related:
+          - Issue: https://issues.redhat.com/browse/MGMT-23103
+          ==========================================

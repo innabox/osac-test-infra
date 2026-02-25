@@ -1,0 +1,3 @@
+---
+dependencies:
+  - role: fulfillment_cli_base

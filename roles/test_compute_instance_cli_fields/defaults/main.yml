@@ -1,0 +1,15 @@
+---
+# ComputeInstance template
+template: osac.templates.ocp_virt_vm
+
+# Explicit spec fields
+test_cores: 2
+test_memory_gib: 4
+test_boot_disk_size: 20
+test_image: "quay.io/containerdisks/fedora:latest"
+test_image_source_type: registry
+test_run_strategy: Always
+
+# Timeouts
+provision_timeout: 600
+status_poll_interval: 5
