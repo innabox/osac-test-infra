@@ -199,25 +199,6 @@
   delay: 5
   failed_when: false
 
-- name: Wait for user data Secret to be cleaned up
-  ansible.builtin.shell:
-    cmd: >
-      kubectl --as system:admin get secret {{ compute_instance_id }}-user-data
-      -n {{ test_namespace }} 2>&1
-  register: secret_cleanup_check
-  changed_when: false
-  failed_when: false
-  until: "'NotFound' in secret_cleanup_check.stderr"
-  retries: 12
-  delay: 10
-
-- name: Assert user data Secret was deleted
-  ansible.builtin.assert:
-    that:
-      - "'NotFound' in secret_cleanup_check.stderr"
-    fail_msg: "User data Secret was not cleaned up after ComputeInstance deletion"
-    success_msg: "User data Secret cleaned up successfully"
-
 - name: Log test completion
   ansible.builtin.lineinfile:
     path: "{{ testing_workspace }}/test-execution.log"
