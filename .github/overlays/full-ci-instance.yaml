@@ -1,0 +1,20 @@
+# Merged into osac-installer values/full-ci/instance.yaml at e2e install time.
+# Upstream full-ci is missing pieces the per-suite CI profiles already have:
+#   - storageFulfillment: per-tenant StorageClasses (ClusterStorageReady)
+#   - lvms: register StorageBackend + StorageTier named "local" (VMaaS disk tests)
+#   - echoAdapter: metering tests and the workflow metering-adapter step
+aap:
+  instanceGroups:
+    storageFulfillment:
+      enabled: true
+
+lvms:
+  enabled: true
+
+metering:
+  echoAdapter:
+    enabled: true
+    image:
+      repository: ghcr.io/osac-project/metering-echo-adapter
+      tag: latest
+      pullPolicy: Always

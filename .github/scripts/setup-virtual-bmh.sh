@@ -169,12 +169,14 @@ for i in $(seq 1 "${BMH_COUNT}"); do
   qemu-img create -f qcow2 "${DISK_PATH}" 50G
   cp "${OVMF_VARS}" "${VARS_PATH}"
 
+  # libvirt 10.10+: firmware='efi' plus explicit <loader>/<nvram> fails with
+  # "Unable to find 'efi' firmware". The pflash paths already select UEFI.
   ${VIRSH} define /dev/stdin <<VMXML
 <domain type='kvm'>
   <name>${VM_NAME}</name>
   <memory unit='MiB'>8192</memory>
   <vcpu>4</vcpu>
-  <os firmware='efi'>
+  <os>
     <type arch='x86_64' machine='q35'>hvm</type>
     <loader readonly='yes' type='pflash'>${OVMF_CODE}</loader>
     <nvram>${VARS_PATH}</nvram>

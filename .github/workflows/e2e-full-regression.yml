@@ -1,0 +1,950 @@
+---
+# OSAC-4914: one cluster, one OSAC install via the unified Helm profile
+# (osac-installer PROFILE=full-ci). Same sequence as
+# https://github.com/trewest/ai-cloud-validation-dev/blob/main/deploy-osac-env.sh
+# — boot clone, virtual BMHs, install-infra, BMF secrets, install-osac,
+# CaaS agent — then run VMaaS + CaaS + BMaaS pytest on that install.
+#
+# Until osac main's values/full-ci matches the per-suite CI profiles, this
+# workflow deep-merges .github/overlays/full-ci-{infra,instance}.yaml into the
+# cloned installer values (Keycloak devFixtures, AAP storageFulfillment,
+# LVMS StorageTier "local", metering echo-adapter) before the first helm install.
+name: E2E Full Regression
+
+on:
+  workflow_call:
+    inputs:
+      test-filter:
+        description: "pytest -k filter expression (optional). Combined with not TestBmaasNetworking."
+        required: false
+        type: string
+        default: ""
+      namespace:
+        description: "OSAC namespace on the cluster"
+        required: false
+        type: string
+        default: "osac-e2e-ci"
+      vm-template:
+        description: "VM template for compute instances"
+        required: false
+        type: string
+        default: "ocp-virt-vm"
+      cluster-template:
+        description: "Cluster template for CaaS tests"
+        required: false
+        type: string
+        default: "ocp-ci-small"
+      bmi-template:
+        description: "BareMetalInstance template"
+        required: false
+        type: string
+        default: "bm-host-provisioning"
+      bmh-namespace:
+        description: "Namespace for BareMetalHost resources"
+        required: false
+        type: string
+        default: "host-inventory"
+      flavor-image:
+        description: "OCI image containing the cluster-tool flavor"
+        required: false
+        type: string
+        default: "quay.io/osac-project/cluster-flavors:sno-4-22"
+      flavor-name:
+        description: "cluster-tool flavor name"
+        required: false
+        type: string
+        default: "sno-4-22"
+      caas-domain:
+        description: "Base domain for CaaS hosted clusters and DNS"
+        required: false
+        type: string
+        default: "ecoeng-osac-ci.devcluster.openshift.com"
+      image-overrides:
+        description: "JSON object mapping Helm value paths to image refs"
+        required: false
+        type: string
+        default: "{}"
+      installer-ref:
+        description: "Branch/ref of osac-installer to clone for the deploy step"
+        required: false
+        type: string
+        default: "main"
+      installer-repo:
+        description: "GitHub repo (owner/name) of the OSAC monorepo"
+        required: false
+        type: string
+        default: "osac-project/osac"
+      test-infra-repository:
+        description: "Repository to checkout for tests/Containerfile (for cross-repo calls)"
+        required: false
+        type: string
+        default: ""
+      test-infra-ref:
+        description: "Git ref of test infrastructure repository"
+        required: false
+        type: string
+        default: ""
+      components:
+        description: >-
+          JSON array of components to build from source and load onto the cluster, e.g.
+          '[{"repo":"osac-project/osac","ref":"my-branch","containerfile":"fulfillment-service/Containerfile","imageKey":"service.images.service"},{"repo":"osac-project/osac","ref":"my-branch","containerfile":"osac-operator/Containerfile","imageKey":"operator.image.repository"}]'.
+          Each entry supports repo, ref, imageKey (required), containerfile
+          (default "Containerfile"), buildType ("containerfile" default, or "ansible-builder"),
+          and context (build context directory relative to repo root; when omitted,
+          defaults to the containerfile's parent directory).
+          Empty array (default) builds nothing from source -- use image-overrides for
+          pre-built images instead.
+        required: false
+        type: string
+        default: "[]"
+      osac-cli-version:
+        description: "OSAC CLI version for the test image (e.g. 0.0.73). Defaults to latest GitHub release."
+        required: false
+        type: string
+        default: ""
+      fork-pr-author-association:
+        description: "PR author_association from the caller"
+        required: false
+        type: string
+        default: ""
+      fork-pr-author:
+        description: "GitHub login of the PR author (for fork PR org membership check)"
+        required: false
+        type: string
+        default: ""
+      pr-number:
+        description: "PR number (for label-based authorization check)"
+        required: false
+        type: string
+        default: ""
+      notify-on-failure:
+        description: "Send Slack notification on failure (typically set for scheduled runs)"
+        required: false
+        type: boolean
+        default: false
+      enable-ai-diagnostic:
+        description: >-
+          Run an AI (Vertex AI/Gemini) root-cause diagnosis on failure and
+          write it to the job summary. Callers should gate this on
+          `github.ref == 'refs/heads/main'`, not on event type -- the
+          actual constraint is WIF trust (main branch only), which has
+          nothing to do with which event triggered the run. Checking the
+          ref this way correctly covers both schedule (always main) and a
+          manual workflow_dispatch run against main (also safe, same WIF
+          context), while naturally excluding pull_request (github.ref is
+          the synthetic PR-merge ref, never refs/heads/main) and
+          merge_group (github.ref is the readonly-queue ref) without
+          needing to enumerate event names. It's also moot for genuine
+          fork PRs regardless of ref: a run whose head is a fork gets a
+          read-only token from GitHub Actions with no OIDC minting at all,
+          by policy, and every real-world PR on osac/osac-test-infra is
+          confirmed to be fork-originated today.
+        required: false
+        type: boolean
+        default: false
+      runner-label:
+        description: "Self-hosted runner label to target"
+        required: false
+        type: string
+        default: "osac-ci"
+      test-ref:
+        description: "Git ref for the osac mono-repo test checkout"
+        required: false
+        type: string
+        default: "main"
+      test-repository:
+        description: "GitHub repo (owner/name) to checkout for e2e tests"
+        required: false
+        type: string
+        default: "osac-project/osac"
+    outputs:
+      result:
+        description: "Test result: PASSED or FAILED"
+        value: ${{ jobs.e2e.outputs.result }}
+
+jobs:
+  e2e:
+    runs-on: ${{ inputs.runner-label }}
+    environment: e2e-test
+    permissions:
+      contents: read
+      id-token: write # only exercised when enable-ai-diagnostic is true (always false for fork PR runs)
+    outputs:
+      result: ${{ steps.test.outcome == 'success' && 'PASSED' || 'FAILED' }}
+
+    env:
+      FLAVOR_LOCK: "/tmp/cluster-tool-flavor-${{ inputs.flavor-name }}.lock"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ inputs.test-infra-repository || github.repository }}
+          ref: ${{ inputs.test-infra-ref || '' }}
+          persist-credentials: false
+
+      - name: Overlay tests from osac mono-repo
+        env:
+          TEST_REF: ${{ inputs.test-ref }}
+          TEST_REPOSITORY: ${{ inputs.test-repository }}
+        run: |
+          if [[ ! "${TEST_REPOSITORY}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::test-repository must be owner/name, got '${TEST_REPOSITORY}'"
+            exit 1
+          fi
+          OSAC_CLONE_DIR="$RUNNER_TEMP/osac-test-source"
+          git init "$OSAC_CLONE_DIR"
+          git -C "$OSAC_CLONE_DIR" sparse-checkout init --cone
+          git -C "$OSAC_CLONE_DIR" sparse-checkout set tests
+          git -C "$OSAC_CLONE_DIR" fetch --depth 1 \
+            "https://github.com/${TEST_REPOSITORY}.git" "${TEST_REF}"
+          git -C "$OSAC_CLONE_DIR" checkout FETCH_HEAD
+          # Overlay tests/ only. Do not copy pyproject.toml: osac's is named
+          # osac-e2e and has no uv.lock, which breaks uv sync --frozen.
+          rm -rf tests/
+          cp -r "$OSAC_CLONE_DIR/tests" ./tests
+
+      - name: Validate and bootstrap
+        id: setup
+        uses: ./.github/actions/validate-and-bootstrap
+        with:
+          test-suite: full
+          run-id: ${{ github.run_id }}
+
+      - name: Resolve and validate components input
+        id: components
+        env:
+          COMPONENTS_JSON: ${{ inputs.components }}
+        run: |
+          echo "::group::Resolve and validate components input"
+
+          if ! echo "${COMPONENTS_JSON}" | jq -e 'type == "array"' >/dev/null; then
+            echo "::error::components must be a JSON array"
+            exit 1
+          fi
+          COUNT=$(echo "${COMPONENTS_JSON}" | jq 'length')
+          for i in $(seq 0 $((COUNT - 1))); do
+            repo=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].repo // empty")
+            ref=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].ref // empty")
+            image_key=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].imageKey // empty")
+            if [[ -z "${repo}" || -z "${ref}" || -z "${image_key}" ]]; then
+              echo "::error::components[$i] requires repo, ref, and imageKey"
+              exit 1
+            fi
+            if [[ ! "${repo}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::components[$i].repo '${repo}' is not a valid org/repo format"
+              exit 1
+            fi
+          done
+
+          {
+            echo "components<<EOF_RESOLVED_COMPONENTS"
+            echo "${COMPONENTS_JSON}"
+            echo "EOF_RESOLVED_COMPONENTS"
+          } >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+      - name: Authorize fork PR
+        if: inputs.fork-pr-author-association != ''
+        uses: ./.github/actions/authorize-fork-pr
+        with:
+          role-id: ${{ steps.setup.outputs.role-id }}
+          secret-id: ${{ steps.setup.outputs.secret-id }}
+          fork-pr-author: ${{ inputs.fork-pr-author }}
+          pr-number: ${{ inputs.pr-number }}
+
+      - name: Fetch and write secrets
+        id: secrets
+        uses: ./.github/actions/fetch-and-write-secrets
+        with:
+          role-id: ${{ steps.setup.outputs.role-id }}
+          secret-id: ${{ steps.setup.outputs.secret-id }}
+
+      - name: Fetch CaaS secrets
+        id: caas-secrets
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
+        with:
+          url: http://127.0.0.1:8200
+          method: approle
+          roleId: ${{ steps.setup.outputs.role-id }}
+          secretId: ${{ steps.setup.outputs.secret-id }}
+          exportEnv: false
+          secrets: |
+            secret/data/osac/e2e/aws-credentials access_key_id | AWS_ACCESS_KEY_ID ;
+            secret/data/osac/e2e/aws-credentials secret_access_key | AWS_SECRET_ACCESS_KEY
+
+      - name: Prepare cluster environment
+        env:
+          FLAVOR_IMAGE: ${{ inputs.flavor-image }}
+          FLAVOR_NAME: ${{ inputs.flavor-name }}
+        run: |
+          CT_CONFIG="${HOME}/.config/cluster-tool"
+          ROOT_CONFIG="/root/.config/cluster-tool"
+          if [[ -f "${CT_CONFIG}/servers.json" ]] && [[ -f "${CT_CONFIG}/state.json" ]]; then
+            echo "cluster-tool already configured."
+          elif [[ -f "${ROOT_CONFIG}/servers.json" ]]; then
+            echo "Syncing cluster-tool config from root..."
+            mkdir -p "${CT_CONFIG}"
+            cp "${ROOT_CONFIG}"/{config,servers.json,state.json,cluster-tool.key,cluster-tool.key.pub} "${CT_CONFIG}/" 2>/dev/null || true
+          else
+            echo "ERROR: cluster-tool not configured. Run machine-init.sh first." >&2
+            exit 1
+          fi
+
+          DIGEST_FILE="/tmp/cluster-tool-flavor-${FLAVOR_NAME}.digest"
+          REMOTE_DIGEST=$(skopeo inspect "docker://${FLAVOR_IMAGE}" --format '{{.Digest}}' 2>/dev/null || echo "")
+
+          exec 9>"${FLAVOR_LOCK}"
+          flock --exclusive 9
+          echo "Acquired flavor lock."
+
+          LOCAL_DIGEST=""
+          if [[ -f "${DIGEST_FILE}" ]]; then
+            LOCAL_DIGEST=$(cat "${DIGEST_FILE}")
+          fi
+
+          FLAVOR_EXISTS=false
+          if sudo python3 /usr/local/bin/cluster-tool flavors 9>&- \
+               | grep -q "^${FLAVOR_NAME} "; then
+            FLAVOR_EXISTS=true
+          fi
+
+          NEED_PULL=false
+          if ${FLAVOR_EXISTS}; then
+            if [[ -n "${REMOTE_DIGEST}" ]] && [[ "${REMOTE_DIGEST}" == "${LOCAL_DIGEST}" ]]; then
+              echo "Flavor '${FLAVOR_NAME}' is up to date — skipping pull."
+            elif [[ -n "${REMOTE_DIGEST}" ]] && [[ -z "${LOCAL_DIGEST}" ]]; then
+              echo "Flavor '${FLAVOR_NAME}' already present, seeding digest file."
+              echo "${REMOTE_DIGEST}" > "${DIGEST_FILE}"
+            elif [[ -n "${REMOTE_DIGEST}" ]]; then
+              echo "Flavor '${FLAVOR_NAME}' image changed — deleting and re-pulling..."
+              sudo python3 /usr/local/bin/cluster-tool flavors --delete "${FLAVOR_NAME}" 9>&- || true
+              NEED_PULL=true
+            else
+              echo "Flavor '${FLAVOR_NAME}' already present, could not check remote digest — skipping pull."
+            fi
+          else
+            echo "Flavor '${FLAVOR_NAME}' not found — pulling..."
+            NEED_PULL=true
+          fi
+
+          if ${NEED_PULL}; then
+            sudo python3 /usr/local/bin/cluster-tool pull "${FLAVOR_IMAGE}" 9>&-
+            if [[ -n "${REMOTE_DIGEST}" ]]; then
+              echo "${REMOTE_DIGEST}" > "${DIGEST_FILE}"
+            fi
+          fi
+
+          exec 9>&-
+          echo "Released flavor lock."
+
+          sudo python3 /usr/local/bin/cluster-tool destroy "${CLONE_NAME}" 2>/dev/null || true
+          BRIDGE_PREFIX="br-${CLONE_NAME:0:8}"
+          for br in $(ip -o link show | grep -oP "${BRIDGE_PREFIX}[^ @]*"); do
+            echo "Removing stale bridge ${br}..."
+            sudo ip link set "${br}" down 2>/dev/null || true
+            sudo ip link delete "${br}" 2>/dev/null || true
+          done
+
+      - name: Boot cluster clone
+        env:
+          FLAVOR_NAME: ${{ inputs.flavor-name }}
+        run: |
+          exec 9>"${FLAVOR_LOCK}"
+          flock --shared 9
+          sudo python3 /usr/local/bin/cluster-tool boot \
+            --flavor "${FLAVOR_NAME}" --name "${CLONE_NAME}" \
+            --pull-secret "$RUNNER_TEMP/pull-secret.json" 9>&-
+          exec 9>&-
+
+          echo "Cluster clone '${CLONE_NAME}' booted."
+
+          sudo cp "${HOME}/.kube/${CLONE_NAME}.kubeconfig" "$RUNNER_TEMP/kubeconfig"
+          sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+
+      - name: Setup virtual BareMetalHosts
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+          BMH_NAMESPACE: ${{ inputs.bmh-namespace }}
+        run: bash .github/scripts/setup-virtual-bmh.sh
+
+      # Loops over the `components` JSON array so any number of components
+      # (one, two, or the 5-8 this repo is headed toward) can be built from
+      # source in a single e2e run -- fixed named inputs (component-repo,
+      # a "component2-repo" for a second slot, and so on) don't scale past a
+      # handful without adding new inputs for every additional caller.
+      - name: Build and load component images
+        if: steps.components.outputs.components != '[]' && steps.components.outputs.components != ''
+        shell: bash
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+          COMPONENTS_JSON: ${{ steps.components.outputs.components }}
+        run: |
+          RESULTS="[]"
+          COUNT=$(echo "${COMPONENTS_JSON}" | jq 'length')
+          NODE_NAME=$(oc get nodes -o jsonpath='{.items[0].metadata.name}')
+
+          # Track the resolved SHA per repo so every component from the same
+          # repo is built from the exact same commit.  This eliminates two
+          # race conditions: (1) merge-queue branches being deleted between
+          # sequential clones, and (2) main advancing between clones, which
+          # produces divergent SHAs and fails the installer-pin check.
+          declare -A REPO_PINNED_SHA
+
+          for i in $(seq 0 $((COUNT - 1))); do
+            repo=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].repo")
+            ref=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].ref")
+            file=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].containerfile // \"Containerfile\"")
+            image_key=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].imageKey")
+            build_type=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].buildType // \"containerfile\"")
+            context=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].context // empty")
+
+            tag="localhost/component-${i}-pr:${GITHUB_RUN_ID}"
+            src="$RUNNER_TEMP/component-${i}-src"
+
+            echo "::group::Build component[$i]: ${repo}@${ref} (${file})"
+            if [[ -n "${REPO_PINNED_SHA[$repo]:-}" ]]; then
+              sha="${REPO_PINNED_SHA[$repo]}"
+              echo "Cloning ${repo} at pinned SHA ${sha} (first clone resolved this from ref '${ref}')."
+              git init "${src}"
+              git -C "${src}" fetch --depth 1 "https://github.com/${repo}.git" "${sha}"
+              git -C "${src}" checkout FETCH_HEAD
+            else
+              git init "${src}"
+              git -C "${src}" fetch --depth 1 "https://github.com/${repo}.git" "${ref}"
+              git -C "${src}" checkout FETCH_HEAD
+              sha=$(git -C "${src}" rev-parse HEAD)
+              REPO_PINNED_SHA[$repo]="${sha}"
+              echo "Pinned ${repo} to SHA ${sha} (resolved from ref '${ref}')."
+            fi
+
+            # Derive component_dir (for CLI build, CRD discovery) from
+            # the containerfile path, and build_context (for podman build)
+            # from the optional context field.  When context is omitted,
+            # build_context defaults to component_dir (the containerfile's
+            # parent directory), preserving pre-existing behavior.
+            component_dir="${src}"
+            build_context="${src}"
+            containerfile_name="${file}"
+            if [[ "${file}" == */* ]]; then
+              component_dir="${src}/$(dirname "${file}")"
+              containerfile_name="$(basename "${file}")"
+            fi
+            if [[ -n "${context}" ]]; then
+              build_context="${src}/${context}"
+            else
+              build_context="${component_dir}"
+            fi
+
+            if [[ "${build_type}" == "ansible-builder" ]]; then
+              python3 -m pip install --quiet 'ansible-builder~=3.0'
+              ansible-builder create --file "${component_dir}/${containerfile_name}" --context "${component_dir}/context"
+              podman build -t "${tag}" -f "${component_dir}/context/Containerfile" "${component_dir}/context"
+            else
+              podman build -t "${tag}" -f "${component_dir}/${containerfile_name}" "${build_context}"
+            fi
+
+            # Build OSAC CLI from source when this component is fulfillment-service.
+            # Keyed off imageKey (not a repo-name substring), so this works whether
+            # repo is fulfillment-service's own repo or a monorepo like osac-project/osac.
+            if [[ "${image_key}" == "service.images.service" ]]; then
+              (cd "${component_dir}" && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/osac-cli-bin" ./cmd/osac)
+              echo "OSAC_CLI_BIN=$RUNNER_TEMP/osac-cli-bin" >> "$GITHUB_ENV"
+            fi
+
+            echo "Loading image onto node ${NODE_NAME}..."
+            podman save "${tag}" | oc debug "node/${NODE_NAME}" -t=false -- chroot /host podman load
+
+            RESULTS=$(echo "${RESULTS}" | jq -c \
+              --arg image "${tag}" --arg key "${image_key}" \
+              --arg repo "${repo}" --arg ref "${ref}" --arg sha "${sha}" --arg file "${file}" \
+              '. + [{"image":$image,"imageKey":$key,"repo":$repo,"ref":$ref,"sha":$sha,"containerfile":$file,"crdsDir":""}]')
+
+            # Recorded after every component, not just once at the end -- if
+            # a later component fails the loop, images already built and
+            # loaded by earlier ones are still tracked here so Teardown can
+            # still clean them up instead of leaking them on the runner.
+            {
+              echo "COMPONENT_BUILD_RESULTS<<EOF_COMPONENT_BUILD_RESULTS"
+              echo "${RESULTS}"
+              echo "EOF_COMPONENT_BUILD_RESULTS"
+            } >> "$GITHUB_ENV"
+            echo "::endgroup::"
+          done
+
+      - name: Build test image
+        env:
+          E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
+          OSAC_VERSION: ${{ inputs.osac-cli-version }}
+        run: |
+          BUILD_ARGS="--build-arg OSAC_VERSION=${OSAC_VERSION}"
+          if [[ -n "${OSAC_CLI_BIN:-}" ]] && [[ -f "${OSAC_CLI_BIN}" ]]; then
+            cp "${OSAC_CLI_BIN}" ./osac-cli-bin
+            BUILD_ARGS="--build-arg OSAC_CLI_BIN=osac-cli-bin"
+          fi
+          podman build --no-cache ${BUILD_ARGS} -t "${E2E_IMAGE}" -f Containerfile .
+          rm -f ./osac-cli-bin
+
+      - name: Prepare cluster prerequisites
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+        run: |
+          echo "Waiting for CatalogSource redhat-operators to be READY..."
+          oc wait --for=jsonpath='{.status.connectionState.lastObservedState}'=READY \
+            catalogsource/redhat-operators -n openshift-marketplace --timeout=300s
+
+          echo "Patching OVN masquerade subnet to 169.254.0.0/17..."
+          oc patch networks.operator.openshift.io cluster --type=merge \
+            -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"ipv4":{"internalMasqueradeSubnet":"169.254.0.0/17"}}}}}}'
+          oc delete pod -n openshift-network-operator -l name=network-operator
+          echo "Waiting 180s for OVN to stabilize..."
+          sleep 180
+          oc rollout status ds/ovnkube-node -n openshift-ovn-kubernetes --timeout=300s
+
+      - name: Install grpcurl
+        uses: ./.github/actions/install-grpcurl
+
+      - name: Install infrastructure operators
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+          INSTALLER_NAMESPACE: ${{ inputs.namespace }}
+          INSTALLER_REF: ${{ inputs.installer-ref }}
+          INSTALLER_REPO: ${{ inputs.installer-repo }}
+        run: |
+          set -o pipefail
+          if ! command -v helm &>/dev/null; then
+            curl --retry 5 --retry-delay 2 -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          fi
+          if ! command -v yq &>/dev/null; then
+            YQ_VERSION="v4.53.3"
+            YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
+            YQ_DIR="${RUNNER_TEMP}/bin"
+            mkdir -p "${YQ_DIR}"
+            curl --retry 5 --retry-delay 2 -fsSL -o "${YQ_DIR}/yq" \
+              "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+            echo "${YQ_SHA256}  ${YQ_DIR}/yq" | sha256sum -c -
+            chmod +x "${YQ_DIR}/yq"
+            export PATH="${YQ_DIR}:${PATH}"
+            echo "${YQ_DIR}" >> "$GITHUB_PATH"
+          fi
+
+          # Clone the OSAC monorepo for installer charts.  When components
+          # were built from source earlier in this job, pin to the same
+          # commit SHA — the branch may have moved since the component
+          # clone, and a second git-clone at the branch name would race.
+          INSTALLER_CLONE_DIR="$RUNNER_TEMP/osac-installer-clone"
+          PINNED_SHA=$(echo "${COMPONENT_BUILD_RESULTS:-[]}" | jq -r '.[0].sha // empty')
+
+          if [[ -n "${PINNED_SHA}" ]]; then
+            echo "Cloning installer at component-resolved commit (${PINNED_SHA})."
+            git init "${INSTALLER_CLONE_DIR}"
+            git -C "${INSTALLER_CLONE_DIR}" fetch --depth 1 \
+              "https://github.com/${INSTALLER_REPO}.git" "${PINNED_SHA}"
+            git -C "${INSTALLER_CLONE_DIR}" checkout FETCH_HEAD
+            if [[ -f "${INSTALLER_CLONE_DIR}/.gitmodules" ]]; then
+              git -C "${INSTALLER_CLONE_DIR}" submodule update --init --recursive --depth 1
+            fi
+          else
+            git clone --recurse-submodules --depth 1 --branch "${INSTALLER_REF}" \
+              "https://github.com/${INSTALLER_REPO}.git" "${INSTALLER_CLONE_DIR}"
+          fi
+
+          # The actual installer content (Makefile, charts/, values/) lives one
+          # level down at osac-installer/ in the monorepo. Detected by directory
+          # presence rather than assumed from installer-repo's name.
+          if [[ -d "${INSTALLER_CLONE_DIR}/osac-installer" ]]; then
+            INSTALLER_DIR="${INSTALLER_CLONE_DIR}/osac-installer"
+          else
+            INSTALLER_DIR="${INSTALLER_CLONE_DIR}"
+          fi
+          echo "INSTALLER_DIR=${INSTALLER_DIR}" >> "$GITHUB_ENV"
+          cd "${INSTALLER_DIR}"
+
+          # full-ci on osac main is not yet equivalent to vmaas-ci/caas-ci for
+          # e2e (Keycloak test-user passwords, AAP storage fulfillment, LVMS
+          # StorageTier "local", metering echo-adapter). Overlay those bits
+          # before the first helm install — do not helm-upgrade osac-infra later
+          # to flip them (CNV hook timeout).
+          OVERLAY_DIR="${GITHUB_WORKSPACE}/.github/overlays"
+          yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' \
+            values/full-ci/infra.yaml "${OVERLAY_DIR}/full-ci-infra.yaml" \
+            > values/full-ci/infra.yaml.merged
+          mv values/full-ci/infra.yaml.merged values/full-ci/infra.yaml
+          yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' \
+            values/full-ci/instance.yaml "${OVERLAY_DIR}/full-ci-instance.yaml" \
+            > values/full-ci/instance.yaml.merged
+          mv values/full-ci/instance.yaml.merged values/full-ci/instance.yaml
+          echo "::group::Merged full-ci values"
+          echo "--- infra.yaml (keycloak) ---"
+          yq '.keycloak' values/full-ci/infra.yaml
+          echo "--- instance.yaml (aap.instanceGroups, lvms, metering.echoAdapter) ---"
+          yq '.aap.instanceGroups' values/full-ci/instance.yaml
+          yq '.lvms' values/full-ci/instance.yaml
+          yq '.metering.echoAdapter' values/full-ci/instance.yaml
+          echo "::endgroup::"
+
+          make install-infra PLATFORM=openshift PROFILE=full-ci NS="${INSTALLER_NAMESPACE}"
+
+      - name: Create BMF secrets
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+          INSTALLER_NAMESPACE: ${{ inputs.namespace }}
+          BMH_NAMESPACE: ${{ inputs.bmh-namespace }}
+        run: |
+          # full-ci does not Helm-manage Metal3 inventory secrets the way
+          # bmaas-ci does. Match deploy-osac-env.sh: create them before
+          # install-osac so the BMF operator can reconcile.
+          oc create namespace "${INSTALLER_NAMESPACE}" --dry-run=client -o yaml | oc apply -f -
+
+          INV="${RUNNER_TEMP}/osac-inventory.yaml"
+          MGMT="${RUNNER_TEMP}/osac-management.yaml"
+          cat >"${INV}" <<EOF
+          type: metal3
+          hostClass: metal3
+          networkClass: metal3
+          options:
+            metal3:
+              namespace: ${BMH_NAMESPACE}
+          EOF
+          cat >"${MGMT}" <<EOF
+          type: metal3
+          options:
+            metal3:
+              namespace: ${BMH_NAMESPACE}
+          EOF
+
+          oc create secret generic osac-inventory-config \
+            --from-file=inventory.yaml="${INV}" \
+            -n "${INSTALLER_NAMESPACE}" --dry-run=client -o yaml | oc apply -f -
+          oc create secret generic osac-management-config \
+            --from-file=management.yaml="${MGMT}" \
+            -n "${INSTALLER_NAMESPACE}" --dry-run=client -o yaml | oc apply -f -
+          oc create secret generic osac-os-clouds \
+            --from-literal=clouds.yaml="" \
+            -n "${INSTALLER_NAMESPACE}" --dry-run=client -o yaml | oc apply -f -
+          oc create configmap osac-profiles \
+            --from-literal=profile.yaml="" \
+            -n "${INSTALLER_NAMESPACE}" --dry-run=client -o yaml | oc apply -f -
+
+      - name: Install OSAC
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+          INSTALLER_NAMESPACE: ${{ inputs.namespace }}
+          INSTALLER_CLUSTER_TEMPLATE: ${{ inputs.cluster-template }}
+          AAP_LICENSE_FILE: ${{ runner.temp }}/aap-license.zip
+          IMAGE_OVERRIDES: ${{ inputs.image-overrides }}
+          AWS_ACCESS_KEY_ID: ${{ steps.caas-secrets.outputs.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.caas-secrets.outputs.AWS_SECRET_ACCESS_KEY }}
+          CAAS_DOMAIN: ${{ inputs.caas-domain }}
+        run: |
+          # Reuse the osac-installer dir resolved by the earlier install step (via $GITHUB_ENV)
+          cd "${INSTALLER_DIR}"
+
+          # --- Merge each built component's image into overrides ---
+          # Computed BEFORE the install (not after) so the FIRST helm install
+          # already uses every component's PR-built image -- including for
+          # install-time hooks like AAP's post-install bootstrap Job, which
+          # only ever fire on this first install and can't be re-triggered
+          # safely afterward (see OSAC-3556). Unlike bmaas/vmaas, the build
+          # step above never captures component CRDs for caas, so there's no
+          # crdsDir handling to apply here.
+          MERGED_OVERRIDES="${IMAGE_OVERRIDES}"
+          COUNT=$(echo "${COMPONENT_BUILD_RESULTS:-[]}" | jq 'length')
+          for i in $(seq 0 $((COUNT - 1))); do
+            image=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].image")
+            image_key=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].imageKey")
+            repo=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].repo")
+            sha=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].sha")
+
+            if [[ "${image_key}" == *.repository ]]; then
+              img_repo="${image%%:*}"
+              img_tag="${image#*:}"
+              tag_key="${image_key%.repository}.tag"
+              pull_key="${image_key%.repository}.pullPolicy"
+              MERGED_OVERRIDES=$(echo "${MERGED_OVERRIDES}" | \
+                jq -c --arg rk "${image_key}" --arg rv "${img_repo}" \
+                      --arg tk "${tag_key}" --arg tv "${img_tag}" \
+                      --arg pk "${pull_key}" --arg pv "IfNotPresent" \
+                      '. + {($rk): $rv, ($tk): $tv, ($pk): $pv}')
+            else
+              MERGED_OVERRIDES=$(echo "${MERGED_OVERRIDES}" | \
+                jq -c --arg k "${image_key}" --arg v "${image}" '. + {($k): $v}')
+            fi
+
+            # Use resolved SHA instead of branch name — merge-queue branches
+            # are ephemeral and get deleted before AAP can check them out.
+            if [[ "${image_key}" == "aap.bootstrap.image" ]]; then
+              aap_git_uri="https://github.com/${repo}"
+              echo "Component[$i] AAP project override: sha=${sha} uri=${aap_git_uri}"
+              MERGED_OVERRIDES=$(echo "${MERGED_OVERRIDES}" | \
+                jq -c --arg bk "aap.configAsCode.projectGitBranch" --arg bv "${sha}" \
+                      --arg uk "aap.configAsCode.projectGitUri" --arg uv "${aap_git_uri}" \
+                      '. + {($bk): $bv, ($uk): $uv}')
+            fi
+
+            # ansible.controller.execution_environment's own `pull` field
+            # (always/missing/never) controls the imagePullPolicy AWX's
+            # Container Group execution nodes actually use for this EE --
+            # fine at its shipped "always" default for a mutable :latest
+            # tag, but this override is a node-local-only image (loaded via
+            # podman load, never pushed to a real registry), so it must be
+            # "missing" (Controller's IfNotPresent-equivalent) or every AWX
+            # job template execution using this EE fails trying to pull
+            # "eeImage" as if it were a real registry ref (see OSAC-3575).
+            if [[ "${image_key}" == "aap.configAsCode.eeImage" ]]; then
+              MERGED_OVERRIDES=$(echo "${MERGED_OVERRIDES}" | \
+                jq -c '. + {"aap.configAsCode.eeImagePull": "missing"}')
+            fi
+          done
+
+          SET_ARGS=()
+          if [[ -n "${MERGED_OVERRIDES}" ]] && [[ "${MERGED_OVERRIDES}" != "{}" ]]; then
+            for key in $(echo "${MERGED_OVERRIDES}" | jq -r 'keys[]'); do
+              value=$(echo "${MERGED_OVERRIDES}" | jq -r --arg k "${key}" '.[$k]')
+              SET_ARGS+=("--set-string" "${key}=${value}")
+              echo "  --set-string ${key}=${value}"
+            done
+
+            # Local (file://) dependencies: force to 0.0.0 so any real chart
+            # version there is ignored -- helm dependency update just copies
+            # whatever's on disk regardless of its declared version, so pinning
+            # to a fixed placeholder here avoids drift/mismatch churn. Real
+            # registry-hosted deps (e.g. osac-ui's oci:// chart) are left alone --
+            # "0.0.0" isn't a published version, so overwriting those breaks the
+            # actual chart pull.
+            yq -i '(.dependencies[] | select(.repository | test("^file://"))).version = "0.0.0"' charts/osac/Chart.yaml
+            helm dependency update charts/osac/
+          fi
+
+          make install-osac AAP_LICENSE_FILE="${AAP_LICENSE_FILE}" PLATFORM=openshift PROFILE=full-ci NS="${INSTALLER_NAMESPACE}" EXTRA_HELM_ARGS="${SET_ARGS[*]}"
+
+          for tenant in "${INSTALLER_NAMESPACE}" shared; do
+            echo "Creating Tenant: ${tenant}"
+            oc apply -f - <<EOF
+          apiVersion: osac.openshift.io/v1alpha1
+          kind: Tenant
+          metadata:
+            name: ${tenant}
+            namespace: ${INSTALLER_NAMESPACE}
+          spec: {}
+          EOF
+          done
+
+          # VMaaS autouse waits on ClusterStorageReady; without it tests sit
+          # ~10m then fail. storageFulfillment overlay should create the
+          # labeled StorageClasses — fail here if they never appear.
+          for tenant in "${INSTALLER_NAMESPACE}" shared; do
+            echo "Waiting for Tenant/${tenant} ClusterStorageReady=True..."
+            ready=""
+            for i in $(seq 1 60); do
+              ready=$(oc get tenant "${tenant}" -n "${INSTALLER_NAMESPACE}" \
+                -o jsonpath='{range .status.conditions[?(@.type=="ClusterStorageReady")]}{.status}{end}' 2>/dev/null || true)
+              if [[ "${ready}" == "True" ]]; then
+                echo "Tenant/${tenant} ClusterStorageReady=True (attempt ${i})"
+                break
+              fi
+              if [[ "${i}" -eq 60 ]]; then
+                echo "::error::Tenant/${tenant} ClusterStorageReady did not become True (last status='${ready}')"
+                oc get tenant "${tenant}" -n "${INSTALLER_NAMESPACE}" -o yaml || true
+                oc get sc --show-labels || true
+                exit 1
+              fi
+              echo "  attempt ${i}/60 status='${ready:-unset}', retrying in 10s..."
+              sleep 10
+            done
+          done
+
+          # helm --wait only confirms the *new* pod/ReplicaSet is Ready -- it
+          # does not wait for the old pod to finish terminating or for the
+          # Service/route's endpoint list to fully converge, so a caller
+          # right after this (e.g. setup-caas-agents.sh registering the
+          # ci-worker host type) can race a stale or not-yet-routable
+          # backend and get a transient 503 from the gateway. Same fix as
+          # e2e-vmaas-full-install.yml's equivalent step (OSAC-2528) --
+          # confirm every Deployment has actually finished rolling out,
+          # then confirm the real external gRPC endpoint is reachable
+          # before proceeding.
+          echo "Waiting for rollout to complete..."
+          for deploy in $(oc get deploy -n "${INSTALLER_NAMESPACE}" -o name); do
+            oc rollout status "${deploy}" -n "${INSTALLER_NAMESPACE}" --timeout=300s
+          done
+
+          DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')
+          # Public address with bearer-token auth, matching what the real
+          # E2E gRPC clients use (tests/conftest.py's `grpc` fixture) --
+          # the private address used before this could report reachable
+          # while the actual path tests use is still broken (missing
+          # route, UNAUTHENTICATED, etc).
+          GRPC_ADDR="fulfillment-api-${INSTALLER_NAMESPACE}.${DOMAIN}:443"
+          GRPC_TOKEN=$(oc create token admin -n "${INSTALLER_NAMESPACE}" --duration 10m --as system:admin)
+          echo "Waiting for gRPC endpoint ${GRPC_ADDR} to be reachable..."
+          for i in $(seq 1 30); do
+            # -format json + jq status check, not just exit code: grpcurl
+            # exits 0 even when the gRPC Health Checking Protocol response
+            # body reports NOT_SERVING.
+            if grpcurl -insecure -H "Authorization: Bearer ${GRPC_TOKEN}" -format json \
+              "${GRPC_ADDR}" grpc.health.v1.Health/Check 2>/dev/null | jq -e '.status == "SERVING"' >/dev/null 2>&1; then
+              echo "gRPC endpoint reachable (attempt ${i})"
+              break
+            fi
+            if [ "${i}" -eq 30 ]; then
+              echo "gRPC endpoint not reachable after 30 attempts"
+              exit 1
+            fi
+            echo "Attempt ${i}/30 failed, retrying in 2s..."
+            sleep 2
+          done
+
+          # Configure CaaS domain (after image overrides so helm upgrade cannot overwrite)
+          oc patch configmap cluster-fulfillment-ig -n "${INSTALLER_NAMESPACE}" --type=merge \
+            -p "{\"data\":{
+                \"DNS_ZONE\":\"${CAAS_DOMAIN}\",
+                \"EXTERNAL_ACCESS_BASE_DOMAIN\":\"${CAAS_DOMAIN}\",
+                \"EXTERNAL_ACCESS_SUPPORTED_BASE_DOMAINS\":\"${CAAS_DOMAIN}\",
+                \"HOSTED_CLUSTER_BASE_DOMAIN\":\"${CAAS_DOMAIN}\"
+            }}"
+
+          # Configure AWS credentials (after image overrides so helm upgrade cannot overwrite)
+          oc get secret cluster-fulfillment-ig -n "${INSTALLER_NAMESPACE}" >/dev/null 2>&1 || \
+              oc create secret generic cluster-fulfillment-ig -n "${INSTALLER_NAMESPACE}"
+          oc patch secret cluster-fulfillment-ig -n "${INSTALLER_NAMESPACE}" --type=merge \
+            -p "{\"stringData\":{
+                \"AWS_ACCESS_KEY_ID\":\"${AWS_ACCESS_KEY_ID}\",
+                \"AWS_SECRET_ACCESS_KEY\":\"${AWS_SECRET_ACCESS_KEY}\"
+            }}"
+
+      - name: Setup CaaS agent
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+          INSTALLER_NAMESPACE: ${{ inputs.namespace }}
+        run: |
+          # INSTALLER_DIR is resolved and persisted by the earlier install step (via $GITHUB_ENV)
+
+          LIBVIRT_NETWORK="test-infra-net-${CLONE_NAME}" \
+          INSTALLER_NAMESPACE="${INSTALLER_NAMESPACE}" \
+          AGENT_VM_NAME="agent-${CLONE_NAME}" \
+          AGENT_VM_STORAGE_DIR="/data/osac-storage" \
+              bash "${INSTALLER_DIR}/scripts/setup-caas-agents.sh"
+
+      - name: Create test adapter route for metering tests
+        id: metering-adapter
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+        shell: bash
+        run: |
+          NS="${{ inputs.namespace || env.INSTALLER_NAMESPACE }}"
+          SVC_NAME=$(oc get svc -n "${NS}" -l app.kubernetes.io/component=echo-adapter -o jsonpath='{.items[0].metadata.name}')
+          if [ -z "${SVC_NAME}" ]; then
+            echo "::error::No echo-adapter Service found in namespace ${NS} — metering test adapter not deployed"
+            exit 1
+          fi
+          oc expose "svc/${SVC_NAME}" -n "${NS}" --name=metering-test-adapter
+          ROUTE_HOST=$(oc get route metering-test-adapter -n "${NS}" -o jsonpath='{.spec.host}')
+          if [ -z "${ROUTE_HOST}" ]; then
+            echo "::error::Metering test adapter route not available — metering tests will fail"
+            exit 1
+          fi
+          echo "url=http://${ROUTE_HOST}" >> "$GITHUB_OUTPUT"
+      - name: Run E2E tests
+        id: test
+        env:
+          TEST_FILTER: ${{ inputs.test-filter }}
+          OSAC_NAMESPACE: ${{ inputs.namespace }}
+          OSAC_VM_TEMPLATE: ${{ inputs.vm-template }}
+          OSAC_CLUSTER_TEMPLATE: ${{ inputs.cluster-template }}
+          OSAC_BMI_TEMPLATE: ${{ inputs.bmi-template }}
+          OSAC_BMH_NAMESPACE: ${{ inputs.bmh-namespace }}
+          E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
+          METERING_ADAPTER_URL: ${{ steps.metering-adapter.outputs.url }}
+        run: |
+          KUBECONFIG_PATH="$RUNNER_TEMP/kubeconfig"
+
+          # One install (PROFILE=full-ci) runs every cluster-tool suite.
+          # Networking stays Netris-only. -n 0: BMaaS BMH tests must not race.
+          # VMaaS ExternalIPPool needs k8s-only MetalLB (vmaas-ci NetworkClass);
+          # full-ci's singleton NetworkClass is cudn_net, which cannot provision
+          # EIP pools. Do not flip that class here — CaaS/BMaaS share the install.
+          FILTER="not TestBmaasNetworking"
+          if [ -n "${TEST_FILTER}" ]; then
+            FILTER="(${TEST_FILTER}) and ${FILTER}"
+          fi
+
+          mkdir -p "$RUNNER_TEMP/test-output"
+
+          rm -f "$RUNNER_TEMP/caas_ssh_key" "$RUNNER_TEMP/caas_ssh_key.pub"
+          ssh-keygen -t ed25519 -f "$RUNNER_TEMP/caas_ssh_key" -N '' -q
+
+          podman run --rm --network=host \
+            -v "${KUBECONFIG_PATH}":/root/.kube/config:ro,Z \
+            -v "${RUNNER_TEMP}/pull-secret.json":/root/pull-secret:ro,Z \
+            -v "${RUNNER_TEMP}/aap-license.zip":/root/aap-license.zip:ro,Z \
+            -v "${RUNNER_TEMP}/caas_ssh_key.pub":/root/.ssh/id_rsa.pub:ro,Z \
+            -v "${RUNNER_TEMP}/test-output":/tmp/test-output:Z \
+            -e KUBECONFIG=/root/.kube/config \
+            -e OSAC_VM_KUBECONFIG=/root/.kube/config \
+            -e OSAC_NAMESPACE="${OSAC_NAMESPACE}" \
+            -e OSAC_VM_TEMPLATE="${OSAC_VM_TEMPLATE}" \
+            -e OSAC_CLUSTER_TEMPLATE="${OSAC_CLUSTER_TEMPLATE}" \
+            -e OSAC_BMI_TEMPLATE="${OSAC_BMI_TEMPLATE}" \
+            -e OSAC_BMH_NAMESPACE="${OSAC_BMH_NAMESPACE}" \
+            -e OSAC_PULL_SECRET_PATH=/root/pull-secret \
+            -e METERING_ADAPTER_URL="${METERING_ADAPTER_URL}" \
+            "${E2E_IMAGE}" \
+            pytest \
+              tests/e2e/vmaas/ \
+              tests/e2e/references/ \
+              tests/e2e/caas/ \
+              tests/e2e/bmaas/ \
+              --ignore=tests/e2e/bmaas/regression/networking \
+              --ignore=tests/e2e/vmaas/regression/external_ip \
+              -k "${FILTER}" \
+              -n 0 \
+              --junitxml=/tmp/test-output/junit.xml -v
+
+      - name: Gather artifacts
+        if: always()
+        uses: ./.github/actions/gather-artifacts
+        with:
+          namespace: ${{ inputs.namespace }}
+          kubeconfig-path: ${{ runner.temp }}/kubeconfig
+          artifact-name: osac-logs-full-regression-${{ github.run_id }}
+          junit-path: ${{ runner.temp }}/test-output/junit.xml
+
+      - name: Authenticate for AI diagnosis
+        if: failure() && inputs.enable-ai-diagnostic
+        continue-on-error: true # must never block Teardown below
+        uses: ./.github/actions/vertex-ai-auth
+        id: vertex-auth
+
+      - name: Run AI failure diagnosis
+        if: failure() && inputs.enable-ai-diagnostic
+        continue-on-error: true # must never block Teardown below
+        shell: bash
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/osac-artifacts
+          JUNIT_PATH: ${{ runner.temp }}/test-output/junit.xml
+          GOOGLE_CLOUD_PROJECT: ${{ steps.vertex-auth.outputs.gcp-project }}
+          GOOGLE_CLOUD_LOCATION: ${{ steps.vertex-auth.outputs.gcp-location }}
+          WORKFLOW_NAME: "E2E Full Regression"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 .github/scripts/ai-diagnose-failure.py
+
+      - name: Teardown
+        if: always()
+        env:
+          CLONE_NAME: ${{ steps.setup.outputs.clone-name }}
+          E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
+        run: bash .github/scripts/teardown.sh
+
+      - name: Notify Slack on failure
+        if: always() && failure() && inputs.notify-on-failure
+        uses: ./.github/actions/notify-slack
+        with:
+          status: failure
+          workflow-name: "E2E Full Regression"
+          slack-webhook-url: ${{ steps.secrets.outputs.SLACK_WEBHOOK_URL }}
+          workflow-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          branch-name: ${{ github.ref_name }}
+          commit-sha: ${{ github.sha }}
+          artifact-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts

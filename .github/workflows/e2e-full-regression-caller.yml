@@ -1,0 +1,60 @@
+---
+# OSAC-4914: one PROFILE=full-ci install, then VMaaS + CaaS + BMaaS e2e.
+# Does not run on pull_request — the per-suite full-install callers already
+# do that. This workflow is a dedicated schedule plus on-demand dispatch
+# (Actions UI or `/test e2e-full-regression`).
+name: E2E Full Regression
+
+on:
+  schedule:
+    # Daily 02:00 UTC — offset from the per-suite crons that fire on :00
+    # of every 3h/4h/12h (those stay unchanged).
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "pytest -k filter (optional). Always also excludes TestBmaasNetworking."
+        required: false
+        default: ""
+      installer-ref:
+        description: "Branch/ref of the OSAC monorepo"
+        required: false
+        default: "main"
+      installer-repo:
+        description: "GitHub repo (owner/name) of the OSAC monorepo"
+        required: false
+        default: "osac-project/osac"
+      image-overrides:
+        description: "JSON mapping Helm value paths to image refs"
+        required: false
+        default: "{}"
+      osac-cli-version:
+        description: "OSAC CLI version (e.g. 0.0.73). Defaults to latest."
+        required: false
+        default: ""
+      runner-label:
+        description: "Self-hosted runner label to target (e.g. osac-ci-1 to pin to one machine). Defaults to the shared fleet-wide label."
+        required: false
+        default: ""
+
+concurrency:
+  group: e2e-full-regression
+  cancel-in-progress: false
+
+jobs:
+  e2e-full-regression:
+    permissions:
+      contents: read
+      # See e2e-vmaas-full-install-caller.yml's identical grant for why
+      # this is needed.
+      id-token: write
+    uses: ./.github/workflows/e2e-full-regression.yml
+    with:
+      test-filter: ${{ inputs.test-filter || '' }}
+      installer-ref: ${{ inputs.installer-ref || 'main' }}
+      installer-repo: ${{ inputs.installer-repo || 'osac-project/osac' }}
+      image-overrides: ${{ inputs.image-overrides || '{}' }}
+      osac-cli-version: ${{ inputs.osac-cli-version || '' }}
+      runner-label: ${{ inputs.runner-label || 'osac-ci' }}
+      notify-on-failure: ${{ github.event_name == 'schedule' }}
+      enable-ai-diagnostic: ${{ github.ref == 'refs/heads/main' }}

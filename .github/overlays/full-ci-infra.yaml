@@ -1,0 +1,8 @@
+# Merged into osac-installer values/full-ci/infra.yaml at e2e install time.
+# Upstream full-ci omits Keycloak devFixtures; without this, e2e JWT logins
+# (tenant1_admin / foobar) fail with invalid_grant. Same as vmaas-ci/caas-ci.
+# Must be applied on the first install-infra — a later helm upgrade re-runs
+# the CNV configure hook and can BackoffLimitExceeded on an already-configured cluster.
+keycloak:
+  devFixtures:
+    enabled: true

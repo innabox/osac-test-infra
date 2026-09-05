@@ -131,6 +131,7 @@ jobs:
             done < <(jq -r '.[] | "\(.stem)\t\(.name)"' /tmp/available.json)
 
             echo "| \`/test all\` | Re-run all PR workflows |"
+            echo "| \`/test e2e-full-regression\` | Dispatch VMaaS + CaaS + BMaaS full e2e (not a PR rerun) |"
             echo "| \`/test ?\` or \`/test help\` | Show this help |"
             echo "| \`/retest\` | Re-run all failed checks |"
             echo "| \`/cancel [name]\` | Cancel in-progress runs |"
@@ -267,6 +268,54 @@ jobs:
           gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
             -f content='rocket' --silent 2>/dev/null || true
 
+      - name: Handle e2e-full-regression
+        if: steps.cmd.outputs.command == 'e2e-full-regression'
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+          IS_FORK: ${{ steps.pr.outputs.is_fork }}
+        run: |
+          # /test normally reruns existing pull_request runs. Full regression
+          # is schedule/dispatch only (OSAC-4914), so dispatch it instead.
+          # GITHUB_TOKEN is repo-scoped: this only works on osac-test-infra
+          # (the workflow file is not in osac; osac comments cannot start it).
+          if [[ "${REPO}" != *"/osac-test-infra" ]]; then
+            gh pr comment "${PR_NUMBER}" -R "${REPO}" \
+              --body "\`/test e2e-full-regression\` lives in \`osac-test-infra\`. Dispatch **E2E Full Regression** from that repo's Actions tab, or comment on an osac-test-infra PR."
+            gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+              -f content='confused' --silent 2>/dev/null || true
+            exit 1
+          fi
+
+          DISPATCH_ARGS=(workflow run e2e-full-regression-caller.yml -R "${REPO}")
+          if [[ "${IS_FORK}" != "true" && -n "${HEAD_BRANCH}" ]]; then
+            DISPATCH_ARGS+=(--ref "${HEAD_BRANCH}")
+          fi
+
+          if ! gh "${DISPATCH_ARGS[@]}"; then
+            if [[ "${IS_FORK}" != "true" ]]; then
+              echo "::warning::Dispatch on ${HEAD_BRANCH} failed; retrying on default branch."
+              gh workflow run e2e-full-regression-caller.yml -R "${REPO}" || {
+                gh pr comment "${PR_NUMBER}" -R "${REPO}" \
+                  --body "Could not dispatch \`e2e-full-regression\`. Is \`e2e-full-regression-caller.yml\` on this repo's default branch?"
+                gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+                  -f content='confused' --silent 2>/dev/null || true
+                exit 1
+              }
+            else
+              gh pr comment "${PR_NUMBER}" -R "${REPO}" \
+                --body "Could not dispatch \`e2e-full-regression\`. Is \`e2e-full-regression-caller.yml\` on this repo's default branch?"
+              gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+                -f content='confused' --silent 2>/dev/null || true
+              exit 1
+            fi
+          fi
+
+          gh pr comment "${PR_NUMBER}" -R "${REPO}" \
+            --body "Dispatched **E2E Full Regression** (VMaaS + CaaS + BMaaS) from \`${HEAD_SHA:0:7}\`. This is a new scheduled/dispatch run, not a rerun of PR checks."
+          gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content='rocket' --silent 2>/dev/null || true
+
       - name: Execute command
         if: >-
           steps.cmd.outputs.command != '?' &&
@@ -274,6 +323,7 @@ jobs:
           steps.cmd.outputs.command != 'retest' &&
           steps.cmd.outputs.command != 'ok-to-test' &&
           steps.cmd.outputs.command != 'e2e-ready' &&
+          steps.cmd.outputs.command != 'e2e-full-regression' &&
           !startsWith(steps.cmd.outputs.command, 'cancel:')
         env:
           COMMAND: ${{ steps.cmd.outputs.command }}
