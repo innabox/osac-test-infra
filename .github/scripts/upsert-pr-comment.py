@@ -72,8 +72,8 @@ def render_total_block(cost, input_tokens, output_tokens, count):
     plural = "is" if count == 1 else "es"
     # <sub> (smaller) + italic, all as one single-line paragraph -- never
     # split across a blank line into this, since <sub> only shrinks a
-    # single line safely (see ai-diagnose-failure.py's split_root_cause
-    # docstring for the multi-line overlap bug this avoids).
+    # single line safely (see ai-diagnose-failure.py's blockquote/
+    # build_diagnosis_body for the multi-line overlap bug this avoids).
     return (
         f"\n\n<!-- osac-ai-total-cost:{cost!r}:{input_tokens}:{output_tokens}:{count} -->\n"
         f"<sub>*Total AI diagnostic cost for this PR:* ${cost:.4f} "

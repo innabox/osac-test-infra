@@ -153,5 +153,108 @@ class ReadArtifactFileSandboxTests(unittest.TestCase):
         self.assertEqual(result, "real content\n")
 
 
+_FULL_DIAGNOSIS = """### Root cause
+The storage-tier test failed because the CSI driver never provisioned the PVC in time.
+
+### Causal chain
+- the Tenant CR was created
+- osac-csi-driver's provisioner logged a retryable error and kept retrying silently
+
+### Evidence
+`osac-operators/csi-driver.log`:
+```
+E0906 12:00:00.000000 provisioner.go:123] retrying CreateVolume: backend unavailable
+```
+
+<sub>Confidence: 95%</sub>"""
+
+
+class SplitSectionsTests(unittest.TestCase):
+    def test_full_structure(self):
+        summary, causal_chain, evidence, footer = ai_diagnose_failure.split_sections(_FULL_DIAGNOSIS)
+        self.assertEqual(
+            summary,
+            "The storage-tier test failed because the CSI driver never provisioned the PVC in time.",
+        )
+        self.assertIn("osac-csi-driver's provisioner", causal_chain)
+        self.assertIn("provisioner.go:123", evidence)
+        # Evidence must not swallow the trailing confidence footer.
+        self.assertNotIn("Confidence", evidence)
+        self.assertEqual(footer, "<sub>Confidence: 95%</sub>")
+
+    def test_no_footer_still_splits(self):
+        diagnosis = _FULL_DIAGNOSIS.rsplit("\n\n<sub>", 1)[0]
+        summary, _causal_chain, evidence, footer = ai_diagnose_failure.split_sections(diagnosis)
+        self.assertIsNotNone(summary)
+        self.assertIn("provisioner.go:123", evidence)
+        self.assertIsNone(footer)
+
+    def test_no_root_cause_heading_returns_all_none(self):
+        result = ai_diagnose_failure.split_sections("_AI diagnosis unavailable: boom_")
+        self.assertEqual(result, (None, None, None, None))
+
+    def test_missing_causal_chain_degrades_independently(self):
+        # A model that skipped straight from Root cause to Evidence --
+        # summary/evidence must still come back usable.
+        diagnosis = "### Root cause\nSomething broke.\n\n### Evidence\n`f`:\n```\nline\n```"
+        summary, causal_chain, evidence, _footer = ai_diagnose_failure.split_sections(diagnosis)
+        self.assertEqual(summary, "Something broke.")
+        self.assertIsNone(causal_chain)
+        self.assertIn("line", evidence)
+
+
+class CollapseTests(unittest.TestCase):
+    def test_wraps_in_its_own_details_block(self):
+        result = ai_diagnose_failure.collapse("Evidence", "some content")
+        self.assertEqual(
+            result,
+            "<details>\n<summary><sub>Evidence</sub></summary>\n\nsome content\n\n</details>",
+        )
+
+
+class BuildDiagnosisBodyTests(unittest.TestCase):
+    def test_full_structure_causal_chain_and_evidence_each_own_collapse(self):
+        body = ai_diagnose_failure.build_diagnosis_body(
+            _FULL_DIAGNOSIS, "https://example.com/run/1", "E2E Storage", "STORAGE"
+        )
+        self.assertTrue(body.startswith("# ❌ E2E Storage -- AI Diagnosis | Category: `STORAGE`"))
+        # No separate Conclusion section anymore.
+        self.assertNotIn("Conclusion", body)
+        # Causal chain and Evidence are each their OWN <details> collapse,
+        # not shared and not merged into one block.
+        self.assertEqual(body.count("<details>"), 2)
+        self.assertEqual(body.count("</details>"), 2)
+        self.assertIn("<summary><sub>Causal chain</sub></summary>", body)
+        self.assertIn("<summary><sub>Evidence</sub></summary>", body)
+        causal_start = body.index("<summary><sub>Causal chain</sub></summary>")
+        causal_end = body.index("</details>", causal_start)
+        self.assertIn("osac-csi-driver's provisioner", body[causal_start:causal_end])
+        evidence_start = body.index("<summary><sub>Evidence</sub></summary>")
+        evidence_end = body.index("</details>", evidence_start)
+        self.assertIn("provisioner.go:123", body[evidence_start:evidence_end])
+        # Full run link now closes out the summary, before either collapse.
+        first_details_open = body.index("<details>")
+        summary_idx = body.index("The storage-tier test failed")
+        link_idx = body.index("To see the full run, check the [workflow run](https://example.com/run/1).")
+        confidence_idx = body.index("Confidence: 95%")
+        last_details_close = body.rindex("</details>")
+        self.assertLess(summary_idx, link_idx)
+        self.assertLess(link_idx, first_details_open)
+        # Confidence is never collapsed -- must sit after the LAST </details>.
+        self.assertGreater(confidence_idx, last_details_close)
+
+    def test_exception_fallback_has_title_and_link(self):
+        body = ai_diagnose_failure.build_diagnosis_body(
+            "_AI diagnosis unavailable: boom_", "https://example.com/run/1", "E2E VMaaS", None
+        )
+        self.assertTrue(body.startswith("# ❌ E2E VMaaS -- AI Diagnosis | Category: `UNKNOWN`"))
+        self.assertIn("_AI diagnosis unavailable: boom_", body)
+        self.assertIn("To see the full run", body)
+
+    def test_no_run_url_omits_full_run_line(self):
+        body = ai_diagnose_failure.build_diagnosis_body(_FULL_DIAGNOSIS, "", "E2E CaaS", "OSAC_OPERATOR")
+        self.assertNotIn("To see the full run", body)
+
+
 if __name__ == "__main__":
     unittest.main()

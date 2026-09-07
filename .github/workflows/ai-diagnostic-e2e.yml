@@ -583,29 +583,25 @@ jobs:
           CATEGORY: ${{ steps.diagnose-script.outputs.category || 'UNKNOWN' }}
         run: |
           set -euo pipefail
-          SECTION_FILE="${RUNNER_TEMP}/comment-section.md"
           DIAGNOSIS_FILE="${RUNNER_TEMP}/diagnosis.md"
           if [[ ! -s "${DIAGNOSIS_FILE}" ]]; then
-            echo "_AI diagnosis unavailable for this run._" > "${DIAGNOSIS_FILE}"
+            # ai-diagnose-failure.py never ran far enough to write its own
+            # title (build_diagnosis_body), so this fallback grows its own
+            # -- same "# <emoji> WORKFLOW -- AI Diagnosis | Category: ..."
+            # shape, so a reader scanning multiple stacked sections in this
+            # sticky comment sees a consistent header either way.
+            {
+              echo "# ❌ ${WORKFLOW_NAME} -- AI Diagnosis | Category: \`${CATEGORY}\`"
+              echo
+              echo "_AI diagnosis unavailable for this run._"
+            } > "${DIAGNOSIS_FILE}"
           fi
-          # Plain bold header, not <sub> -- a header this short never risks
-          # the multi-line overlap bug (see ai-diagnose-failure.py's
-          # split_root_cause for that history), and shrinking it read as
-          # too small in practice. DIAGNOSIS_FILE already contains the
-          # actual per-run compactness: a one-line Root cause summary
-          # followed by a <details>-collapsed block for Causal
-          # chain/Evidence/Conclusion/confidence -- <details> is a plain
-          # block element, so it doesn't hit that same overlap bug.
-          # DIAGNOSIS_FILE also already has its own Full run link (as the
-          # last item of the Causal chain section, via
-          # ai-diagnose-failure.py's insert_full_run_link) -- not appended
-          # here anymore, so it isn't duplicated.
-          {
-            echo "**❌ ${WORKFLOW_NAME} -- AI Diagnosis | Category:** \`${CATEGORY}\`"
-            echo
-            cat "${DIAGNOSIS_FILE}"
-          } > "${SECTION_FILE}"
-          echo "section-file=${SECTION_FILE}" >> "${GITHUB_OUTPUT}"
+          # DIAGNOSIS_FILE already contains its own title (workflow name +
+          # category badge, via ai-diagnose-failure.py's
+          # build_diagnosis_body) plus its own Full run line closing out
+          # the summary (via format_full_run_line) -- used as-is, not
+          # wrapped with a second header here, so the two don't duplicate.
+          echo "section-file=${DIAGNOSIS_FILE}" >> "${GITHUB_OUTPUT}"
 
       - name: Build updated comment body
         id: body

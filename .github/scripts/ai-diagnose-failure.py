@@ -544,67 +544,149 @@ def extract_category(text):
 # "### Causal chain" heading. Anchored at position 0 (re.match), same
 # reasoning as CATEGORY_PATTERN: this must be the model's own first section,
 # never something matched out of untrusted evidence quoted further down.
-ROOT_CAUSE_PATTERN = re.compile(r"### Root cause\s*\n(.*?)\n+(?=### Causal chain\b)", re.DOTALL)
+ROOT_CAUSE_PATTERN = re.compile(r"### Root cause\s*\n(.*?)\n+(?=### (?:Causal chain|Evidence)\b)", re.DOTALL)
+
+# Causal chain bounded the same way as Root cause -- captured between its
+# own heading and the next section's heading. The prompt no longer has a
+# Conclusion section (dropped as redundant with Root cause -- Root cause
+# already states the diagnosis, and the model's "next step" text rarely
+# added anything the developer couldn't get from Evidence/Causal chain
+# directly), so Evidence is now the LAST section: it runs to the end of
+# the (already footer-stripped, see split_sections) diagnosis, with no
+# following heading to bound it.
+CAUSAL_CHAIN_PATTERN = re.compile(r"### Causal chain\s*\n(.*?)\n+(?=### Evidence\b)", re.DOTALL)
+EVIDENCE_PATTERN = re.compile(r"### Evidence\s*\n(.*)", re.DOTALL)
+
+# The confidence/cost/incomplete-response footer call_gemini appends as
+# "\n\n<sub>...</sub>" at the very end of the diagnosis. Split off first
+# (before the section patterns above run) so EVIDENCE_PATTERN's
+# run-to-end-of-string match captures only the model's own Evidence
+# prose, never this footer.
+FOOTER_PATTERN = re.compile(r"\n\n(<sub>.*</sub>)\s*$", re.DOTALL)
 
 
-def split_root_cause(diagnosis):
-    """Split the model's full structured diagnosis into (summary, detail).
+def split_sections(diagnosis):
+    """Split the model's full structured diagnosis into its named
+    sections: (summary, causal_chain, evidence, footer).
 
     `summary` is the Root cause section's own prose, collapsed to a single
-    line -- short enough to stand alone as an always-visible teaser above a
-    collapsed section, and it changes every run (unlike the header line,
-    which only ever shows the workflow name and category badge). `detail`
-    is everything else (Causal chain / Evidence / Conclusion, plus the
-    confidence/cost footer call_gemini already appended), meant to go
-    inside a <details> block -- see main()'s use of this for why <details>
-    and not <sub>: <details> is a plain block element, so nesting Evidence's
-    code fences and the Causal chain's bullet list inside it doesn't hit the
-    line-height:0 inheritance bug <sub> has for multi-line content (see the
-    "Prepare comment section" step in ai-diagnostic-e2e.yml for the full
-    history of that bug).
+    line -- short enough to stand alone as an always-visible teaser. The
+    other two map directly to their "### " sections, each left as
+    multi-line prose/bullets/code fences for the caller to format (see
+    main()'s use of this -- Causal chain and Evidence become their own
+    SEPARATE <details> collapses, so Confidence in particular is never
+    hidden behind a click). `footer` is the trailing "<sub>Confidence:
+    ...</sub>" block call_gemini already appended, or None if it's
+    missing (e.g. the footer-formatting exception path in call_gemini,
+    which leaves it off entirely).
 
-    Returns (None, diagnosis) unchanged if the expected structure isn't
-    found -- e.g. the "_AI diagnosis unavailable: ..._" exception-fallback
-    path in main(), which never has a "### Root cause" heading at all.
-    Callers must treat a None summary as "don't split", not as an error.
+    Returns all-None if the expected "### Root cause" structure isn't
+    found at all -- e.g. the "_AI diagnosis unavailable: ..._"
+    exception-fallback path in main(), which never has any section
+    headings. Callers must treat a None summary as "don't split", not as
+    an error. A missing Causal chain/Evidence section (model deviated
+    from the requested structure) degrades independently -- it comes
+    back as None too, but summary is still usable.
     """
-    match = ROOT_CAUSE_PATTERN.match(diagnosis)
-    if not match:
-        return None, diagnosis
-    summary = " ".join(match.group(1).split())
-    detail = diagnosis[match.end() :].strip()
-    return summary, detail
+    footer_match = FOOTER_PATTERN.search(diagnosis)
+    if footer_match:
+        footer = footer_match.group(1)
+        body = diagnosis[: footer_match.start()]
+    else:
+        footer = None
+        body = diagnosis
+
+    root_cause_match = ROOT_CAUSE_PATTERN.match(body)
+    if not root_cause_match:
+        return None, None, None, None
+    summary = " ".join(root_cause_match.group(1).split())
+
+    causal_chain_match = CAUSAL_CHAIN_PATTERN.search(body)
+    causal_chain = causal_chain_match.group(1).strip() if causal_chain_match else None
+
+    evidence_match = EVIDENCE_PATTERN.search(body)
+    evidence = evidence_match.group(1).strip() if evidence_match else None
+
+    return summary, causal_chain, evidence, footer
 
 
-# Matches the boundary between the Causal chain section's own content and
-# the following "### Evidence" heading -- used to insert the Full run link
-# as the last item of Causal chain, not as a trailing line after the whole
-# diagnosis (which is what it used to be) or the "### Evidence" heading is
-# not consumed here, just used as an anchor.
-EVIDENCE_HEADING_RE = re.compile(r"\n+(?=### Evidence\b)")
+def collapse(summary_label, text):
+    """Wrap `text` in its own <details>/<summary> collapse.
+
+    <details> is a plain block element (unlike <sub>, whose
+    `line-height: 0` collapses vertical spacing between any multi-line
+    content placed inside it -- see the "Prepare comment section" step in
+    ai-diagnostic-e2e.yml for the full history of that bug), so nesting a
+    bullet list or code fences inside it is safe. Slack has no
+    equivalent, so prepare-diagnosis-for-slack/action.yml unwraps these
+    tags entirely for that destination -- there, the content just reads
+    as a plain, always-visible block instead of a collapse (Slack simply
+    doesn't have collapsible text), which is an acceptable per-platform
+    difference rather than something to work around here.
+    """
+    return f"<details>\n<summary><sub>{summary_label}</sub></summary>\n\n{text}\n\n</details>"
 
 
-def insert_full_run_link(detail, run_url):
-    """Place the Full run link at the end of the Causal chain section
-    (right before Evidence), as its own single-line, <sub>-wrapped
-    paragraph -- single line with blank lines on both sides, so it can't
-    hit the <sub> multi-line overlap bug split_root_cause's own docstring
-    describes.
-
-    Falls back to appending after `detail` entirely (still inside the
-    <details> block) if the "### Evidence" heading isn't found -- e.g. an
-    exception-fallback diagnosis with no real section structure at all.
+def format_full_run_line(run_url):
+    """A plain sentence pointing at the full run, meant to close out the
+    always-visible summary -- replaces the old standalone "<sub>[Full
+    run](url)</sub>" link, which used to be spliced into the middle of
+    the Causal chain section and, before that fix, broke Slack's
+    rendering entirely when left inside an unstripped <sub> wrapper (see
+    prepare-diagnosis-for-slack/action.yml's HTML-stripping step for that
+    history). As part of the summary's own prose there's no reason to
+    isolate it in a <sub> anymore.
     """
     if not run_url:
-        return detail
-    link = f"<sub>[Full run]({run_url})</sub>"
-    match = EVIDENCE_HEADING_RE.search(detail)
-    if not match:
-        return f"{detail}\n\n{link}"
-    # match spans ALL the newlines between Causal chain's last line and
-    # "### Evidence" (the `\n+` is greedy) -- slice at start/end (not just
-    # start) so those original newlines are fully replaced, not added to.
-    return f"{detail[: match.start()]}\n\n{link}\n\n{detail[match.end() :]}"
+        return ""
+    return f"To see the full run, check the [workflow run]({run_url})."
+
+
+def build_diagnosis_body(diagnosis, run_url, workflow_name, category):
+    """Assemble the final posted markdown: title, an always-visible
+    one-line summary (ending with the full-run link), then Causal chain
+    and Evidence as their own SEPARATE <details> collapses, and finally
+    the always-visible confidence/cost footer.
+
+    Previously Causal chain, Evidence, AND the confidence footer were all
+    bundled together behind one shared collapsed <details> block --
+    meaning Confidence (arguably the single most important line for
+    deciding how much to trust the diagnosis) was hidden behind a click
+    along with everything else. Now Causal chain and Evidence each get
+    their own independent collapse (so a reader can expand just the one
+    they want), and Confidence is never collapsed at all. There's also no
+    separate Conclusion section anymore -- it was dropped as redundant
+    with Root cause (the summary already states the diagnosis; the
+    model's "next step" text rarely added anything beyond what Evidence/
+    Causal chain already show), so the full-run link that used to close
+    out Conclusion now closes out the summary instead.
+
+    Falls back to the raw diagnosis text (title + full-run line appended,
+    but no section restructuring) if the expected "### Root cause"
+    structure isn't there at all -- e.g. the "_AI diagnosis unavailable:
+    ..._" exception-fallback diagnosis, which never has any section
+    headings to split on.
+    """
+    title = f"# ❌ {workflow_name} -- AI Diagnosis | Category: `{category or 'UNKNOWN'}`"
+    full_run_line = format_full_run_line(run_url)
+
+    summary, causal_chain, evidence, footer = split_sections(diagnosis.strip())
+    if summary is None:
+        body = diagnosis.strip()
+        if full_run_line:
+            body = f"{body}\n\n{full_run_line}"
+        return f"{title}\n\n{body}"
+
+    summary_text = f"{summary}\n\n{full_run_line}" if full_run_line else summary
+    parts = [summary_text]
+    if causal_chain:
+        parts.append(collapse("Causal chain", causal_chain))
+    if evidence:
+        parts.append(collapse("Evidence", evidence))
+    if footer:
+        parts.append(footer)
+
+    return f"{title}\n\n" + "\n\n".join(parts)
 
 
 def format_confidence_line(confidence):
@@ -1015,8 +1097,8 @@ _RETRY_PROMPT = (
     "section headers and format. If you were cut off for length, be significantly "
     "more concise this time: shorter Evidence quotes (one line each is enough), "
     "fewer Causal chain bullets, no filler. Either way, prioritize actually "
-    "writing out the complete answer -- reaching the Conclusion and the final "
-    "Confidence line -- over exhaustive detail."
+    "writing out the complete answer -- reaching the Evidence section and the "
+    "final Confidence line -- over exhaustive detail."
 )
 
 
@@ -1132,7 +1214,7 @@ def call_gemini(prompt, artifact_dir):
         # (verbose model hitting the token limit again, a repeated empty
         # response, or a content-policy block) -- surfaced explicitly
         # rather than silently presenting a bad answer (missing its
-        # Conclusion/Confidence line, empty, or cut off mid-sentence) as
+        # Evidence/Confidence line, empty, or cut off mid-sentence) as
         # if it were a complete one. Deliberately doesn't claim "even
         # after a retry": a content-policy block (_is_blocked) skips the
         # retry entirely, so that wording would be false in that case.
@@ -1326,19 +1408,6 @@ Never state a claim as prose without a citation backing it -- if you
 can't point to a specific line, use read_artifact_file to find one, or
 don't make that claim.
 
-### Conclusion
-One or two sentences a developer can act on immediately: which component
-is implicated, and ONE concrete, specific next step -- e.g. "check
-whether osac-operator's ClusterOrder reconciler handles a nil X" or
-"verify the AAP playbook's Y task against the new Z field this PR adds",
-something to actually go act on. Do NOT default to "check the logs" or
-"look at the run/artifact" -- the developer already knows the run failed;
-that tells them nothing new. Only fall back to pointing at the GitHub
-Actions run's own job logs at the URL above if you have used
-read_artifact_file and there is genuinely no file left worth reading, and
-say explicitly that this is a fallback due to insufficient evidence, not
-your normal answer.
-
 You must reach a DEFINITIVE root cause with at least
 {CONFIDENCE_THRESHOLD_PERCENT}% confidence before finalizing. If the
 bounded extract above doesn't clearly support that confidence level, use
@@ -1376,28 +1445,7 @@ correct.
         category = None
         cost_usd = input_tokens = output_tokens = None
 
-    # Split into an always-visible one-line summary (the Root cause prose)
-    # plus a <details>-collapsed block for everything else. <details> is a
-    # plain block element (unlike <sub>, whose `line-height: 0` collapses
-    # vertical spacing between any multi-line content placed inside it --
-    # see the "Prepare comment section" step in ai-diagnostic-e2e.yml for
-    # the full history of that bug), so nesting the Causal chain's bullet
-    # list and Evidence's code fences inside it is safe. Falls back to the
-    # full, unsplit diagnosis (no collapse at all) if the expected
-    # "### Root cause" structure isn't there, e.g. the exception-fallback
-    # diagnosis set above.
-    summary, detail = split_root_cause(diagnosis.strip())
-    detail = insert_full_run_link(detail, RUN_URL)
-    if summary:
-        body_md = (
-            f"{summary}\n\n"
-            "<details>\n"
-            "<summary><sub>Causal chain, evidence &amp; confidence</sub></summary>\n\n"
-            f"{detail}\n\n"
-            "</details>"
-        )
-    else:
-        body_md = detail
+    body_md = build_diagnosis_body(diagnosis, RUN_URL, WORKFLOW_NAME, category)
 
     # Each write below is independently guarded: a failure writing ONE of
     # these (a full disk, a permissions issue, GITHUB_STEP_SUMMARY being
@@ -1408,10 +1456,6 @@ correct.
     if SUMMARY_PATH:
         try:
             with open(SUMMARY_PATH, "a") as f:
-                # Plain bold text, not <sub> -- a header this short never
-                # risks the multi-line overlap bug, and shrinking it read
-                # as too small in practice.
-                f.write(f"**AI Failure Diagnosis:** {WORKFLOW_NAME} | Category: `{category or 'UNKNOWN'}`\n\n")
                 f.write(body_md + "\n")
         except Exception as exc:  # noqa: BLE001 -- see comment above
             _safe_print(f"WARNING: failed to write GITHUB_STEP_SUMMARY: {_safe_repr(exc)}", file=sys.stderr)
