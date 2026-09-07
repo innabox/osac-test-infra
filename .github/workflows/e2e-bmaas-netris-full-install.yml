@@ -140,6 +140,13 @@ jobs:
           test-suite: ec2-runner
           run-id: ${{ github.run_id }}
 
+      - name: Validate pull request metadata
+        if: (inputs.pr-number == '' && inputs.pr-sha != '') || (inputs.pr-number != '' && inputs.pr-sha == '')
+        shell: bash
+        run: |
+          echo "::error::pr-number and pr-sha must be supplied together."
+          exit 1
+
       - name: Authorize fork PR
         if: inputs.fork-pr-author-association != ''
         uses: ./.github/actions/authorize-fork-pr
