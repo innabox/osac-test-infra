@@ -493,6 +493,13 @@ jobs:
           # (ai-diagnose-failure.py always writes it there too; commit
           # status `description` is capped at ~140 chars and plain text).
           LISTENER_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # See "Prepare comment section" below for what this covers and
+          # why DIAGNOSIS_FILE being non-empty alone isn't enough -- same
+          # reasoning applies here: without this check, Gemini's own raw
+          # "(empty response from Gemini: ...)" text (or the exception-
+          # fallback message) would end up as this commit status's
+          # description, visible on the PR's Checks tab.
+          DIAGNOSIS_AVAILABLE: ${{ steps.diagnose-script.outputs.diagnosis-available }}
         run: |
           set -euo pipefail
           # Read-only here -- must NOT write a fallback into the shared
@@ -508,7 +515,7 @@ jobs:
           # (a hard failure before ai-diagnose-failure.py ever got to
           # write it).
           DIAGNOSIS_FILE="${RUNNER_TEMP}/diagnosis.md"
-          if [[ -s "${DIAGNOSIS_FILE}" ]]; then
+          if [[ -s "${DIAGNOSIS_FILE}" && "${DIAGNOSIS_AVAILABLE}" == "true" ]]; then
             SNIPPET=$(tr '\n' ' ' <"${DIAGNOSIS_FILE}" | cut -c1-137)
             if [[ "$(wc -c <"${DIAGNOSIS_FILE}")" -gt 137 ]]; then
               SNIPPET="${SNIPPET}..."
@@ -594,23 +601,36 @@ jobs:
           # before setting this output (see ai-diagnose-failure.py's own
           # main(), which always writes it on the success path).
           CATEGORY: ${{ steps.diagnose-script.outputs.category || 'UNKNOWN' }}
+          # False (not just unset) whenever ai-diagnose-failure.py ran but
+          # produced nothing trustworthy to show -- Gemini's own "(empty
+          # response from Gemini: ...)" placeholder after every retry was
+          # exhausted, the exception-fallback message, or an incomplete/
+          # truncated response (see build_diagnosis_body). DIAGNOSIS_FILE
+          # is non-empty in every one of those cases (ai-diagnose-failure.py
+          # still writes a titled body for them), so the `-s` check alone
+          # below can't tell "real diagnosis" apart from "graceful failure
+          # message" -- without this, that raw Gemini/exception text would
+          # get posted straight into the PR's sticky comment.
+          DIAGNOSIS_AVAILABLE: ${{ steps.diagnose-script.outputs.diagnosis-available }}
         run: |
           set -euo pipefail
           DIAGNOSIS_FILE="${RUNNER_TEMP}/diagnosis.md"
-          if [[ ! -s "${DIAGNOSIS_FILE}" ]]; then
-            # ai-diagnose-failure.py never ran far enough to write its own
-            # title (build_diagnosis_body), so this fallback grows its own
-            # -- same "# <emoji> WORKFLOW -- AI Diagnosis | Category: ..."
-            # shape, so a reader scanning multiple stacked sections in this
-            # sticky comment sees a consistent header either way.
+          if [[ ! -s "${DIAGNOSIS_FILE}" || "${DIAGNOSIS_AVAILABLE}" != "true" ]]; then
+            # ai-diagnose-failure.py either never ran far enough to write
+            # its own title (build_diagnosis_body) at all, or it did but
+            # has nothing trustworthy in it -- same clean "# <emoji>
+            # WORKFLOW -- AI Diagnosis | Category: ..." shape either way,
+            # so a reader scanning multiple stacked sections in this
+            # sticky comment sees a consistent header, and never sees
+            # Gemini's own raw internal error text.
             {
               echo "# ❌ ${WORKFLOW_NAME} -- AI Diagnosis | Category: \`${CATEGORY}\`"
               echo
               echo "_AI diagnosis unavailable for this run._"
             } > "${DIAGNOSIS_FILE}"
           fi
-          # DIAGNOSIS_FILE already contains its own title (workflow name +
-          # category badge, via ai-diagnose-failure.py's
+          # Otherwise DIAGNOSIS_FILE already contains its own title
+          # (workflow name + category badge, via ai-diagnose-failure.py's
           # build_diagnosis_body) plus its own Full run line closing out
           # the summary (via format_full_run_line) -- used as-is, not
           # wrapped with a second header here, so the two don't duplicate.
