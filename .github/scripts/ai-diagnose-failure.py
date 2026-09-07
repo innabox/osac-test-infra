@@ -650,8 +650,14 @@ def collapse(summary_label, text):
     as a plain, always-visible block instead of a collapse (Slack simply
     doesn't have collapsible text), which is an acceptable per-platform
     difference rather than something to work around here.
+
+    `summary_label` is wrapped in "**...**" (not just plain text) so that
+    once Slack strips the surrounding tags, the label still stands out as
+    bold text instead of blending into a plain paragraph -- GitHub's
+    <summary> renders it as bold clickable toggle text either way, so
+    this costs nothing there.
     """
-    return f"<details>\n<summary><sub>{summary_label}</sub></summary>\n\n{text}\n\n</details>"
+    return f"<details>\n<summary><sub>**{summary_label}**</sub></summary>\n\n{text}\n\n</details>"
 
 
 def format_full_run_line(run_url):

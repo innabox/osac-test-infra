@@ -36,6 +36,60 @@ runs:
         import sys
 
         text = open(sys.argv[1], "r", errors="replace").read()
+
+        # Shared by both fence-aware steps below (blank-line collapsing and
+        # truncation). Naively matching any "```" as both open and close
+        # (regardless of actual backtick-run length) breaks on GFM's real
+        # fence rule: a fence delimiter can be 3+ backticks, and only a
+        # line whose OWN run is at least that long closes it -- a shorter
+        # run nested inside (e.g. a literal "```" line quoted inside a
+        # "````" block, itself plausible Evidence content if the model
+        # needs to safely quote something that already contains a fence)
+        # is just ordinary content, not a real boundary. Scanning line-by-
+        # line and tracking the opening run's length avoids that.
+        _FENCE_OPEN_RE = re.compile(r"^(`{3,})")
+        _FENCE_CLOSE_RE = re.compile(r"^(`{3,})\s*$")
+
+        def _find_fenced_spans(s):
+            """(start, end) char offsets of every fenced code block in
+            `s`. An unterminated fence (no valid closing run anywhere
+            after it) spans to the end of `s` -- callers treat that as
+            still "inside" a fence, matching how no renderer would ever
+            show a dangling opening marker as a real code block anyway.
+            """
+            spans = []
+            open_start = open_len = None
+            pos = 0
+            for line in s.split("\n"):
+                if open_len is None:
+                    m = _FENCE_OPEN_RE.match(line)
+                    if m:
+                        open_len = len(m.group(1))
+                        open_start = pos
+                else:
+                    m = _FENCE_CLOSE_RE.match(line)
+                    if m and len(m.group(1)) >= open_len:
+                        spans.append((open_start, pos + len(line)))
+                        open_start = open_len = None
+                pos += len(line) + 1
+            if open_len is not None:
+                spans.append((open_start, len(s)))
+            return spans
+
+        def _split_around_fences(s):
+            """[outside, fence, outside, fence, ..., outside] -- same
+            alternating shape as re.split(pattern, s), but with spec-
+            correct fence boundaries from _find_fenced_spans.
+            """
+            pieces = []
+            cursor = 0
+            for start, end in _find_fenced_spans(s):
+                pieces.append(s[cursor:start])
+                pieces.append(s[start:end])
+                cursor = end
+            pieces.append(s[cursor:])
+            return pieces
+
         # Best-effort GitHub-flavored-markdown -> Slack mrkdwn.
         #
         # 1. Strip the <details>/<summary>/<sub> HTML wrappers this
@@ -52,6 +106,25 @@ runs:
         text = re.sub(r"</?details>", "", text)
         text = re.sub(r"</?summary>", "", text)
         text = re.sub(r"</?sub>", "", text)
+        # 1b. Each stripped tag leaves its own original surrounding blank
+        #     lines behind (build_diagnosis_body's collapse() wraps each
+        #     section in its own blank-line-padded <details> block for
+        #     GitHub's benefit), which stack into 2-4 blank lines in a row
+        #     once unwrapped here -- confirmed live, a real posted message
+        #     had 4 blank lines between sections. Collapse any run of 3+
+        #     newlines down to exactly one blank line (2 newlines) --
+        #     but ONLY between fenced blocks, never inside one: Evidence
+        #     quotes verbatim log/YAML content that can legitimately
+        #     contain its own multi-blank-line runs, and the prompt
+        #     requires those quotes to be exact, not paraphrased --
+        #     silently collapsing whitespace inside one would violate
+        #     that. _split_around_fences keeps every fenced span (the
+        #     odd-indexed pieces) untouched; only the wrapper text
+        #     between them gets the collapse applied.
+        pieces = _split_around_fences(text)
+        for i in range(0, len(pieces), 2):
+            pieces[i] = re.sub(r"\n{3,}", "\n\n", pieces[i])
+        text = "".join(pieces)
         # 2. Markdown headers (### Causal chain) have no Slack mrkdwn
         #    equivalent at all -- Slack would otherwise show the literal
         #    "### Causal chain" text, hashes included. Bold instead.
@@ -94,7 +167,26 @@ runs:
         max_chars = 2800
         if len(text) > max_chars:
             suffix = "\n... (truncated -- see the full run for the complete diagnosis)"
-            text = text[: max_chars - len(suffix)] + suffix
+            cut = max_chars - len(suffix)
+            truncated = text[:cut]
+            # A naive character-count cut can land INSIDE one of Evidence's
+            # fenced code blocks -- confirmed live: Slack (unlike some
+            # other Markdown renderers) then renders the dangling opening
+            # marker as literal text instead of a code block, and
+            # everything after it loses its styling too. Computed on the
+            # FULL (pre-cut) text via _find_fenced_spans, using the same
+            # spec-correct fence matching as the blank-line step above --
+            # this also naturally handles the cut landing mid-MARKER
+            # itself (1-2 backticks into a fence delimiter), since that
+            # position still falls inside the span regardless of exactly
+            # which character it lands on. If the cut lands inside a real
+            # span, back up to that span's START entirely, dropping the
+            # whole partial block rather than posting a broken fence.
+            for start, end in _find_fenced_spans(text):
+                if start < cut < end:
+                    truncated = text[:start].rstrip()
+                    break
+            text = truncated + suffix
         print(text)
         PYEOF
         )

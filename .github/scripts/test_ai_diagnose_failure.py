@@ -332,7 +332,7 @@ class CollapseTests(unittest.TestCase):
         result = ai_diagnose_failure.collapse("Evidence", "some content")
         self.assertEqual(
             result,
-            "<details>\n<summary><sub>Evidence</sub></summary>\n\nsome content\n\n</details>",
+            "<details>\n<summary><sub>**Evidence**</sub></summary>\n\nsome content\n\n</details>",
         )
 
 
@@ -349,12 +349,12 @@ class BuildDiagnosisBodyTests(unittest.TestCase):
         # not shared and not merged into one block.
         self.assertEqual(body.count("<details>"), 2)
         self.assertEqual(body.count("</details>"), 2)
-        self.assertIn("<summary><sub>Causal chain</sub></summary>", body)
-        self.assertIn("<summary><sub>Evidence</sub></summary>", body)
-        causal_start = body.index("<summary><sub>Causal chain</sub></summary>")
+        self.assertIn("<summary><sub>**Causal chain**</sub></summary>", body)
+        self.assertIn("<summary><sub>**Evidence**</sub></summary>", body)
+        causal_start = body.index("<summary><sub>**Causal chain**</sub></summary>")
         causal_end = body.index("</details>", causal_start)
         self.assertIn("osac-csi-driver's provisioner", body[causal_start:causal_end])
-        evidence_start = body.index("<summary><sub>Evidence</sub></summary>")
+        evidence_start = body.index("<summary><sub>**Evidence**</sub></summary>")
         evidence_end = body.index("</details>", evidence_start)
         self.assertIn("provisioner.go:123", body[evidence_start:evidence_end])
         # Full run link now closes out the summary, before either collapse.
@@ -414,7 +414,7 @@ class BuildDiagnosisBodyTests(unittest.TestCase):
         self.assertFalse(available)
         # Still gets the normal structured rendering -- only availability changed.
         self.assertIn("Something broke.", body)
-        self.assertIn("<summary><sub>Causal chain</sub></summary>", body)
+        self.assertIn("<summary><sub>**Causal chain**</sub></summary>", body)
 
     def test_complete_diagnosis_stays_available(self):
         body, available = ai_diagnose_failure.build_diagnosis_body(
