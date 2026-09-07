@@ -41,6 +41,11 @@
         cmd: qemu-img create -f qcow2 /var/lib/libvirt/images/hgx-00-lvm.qcow2 {{ ocp_lvm_disk_gb }}G
       changed_when: true
 
+    - name: Reserve OCP VM bmc-net address before boot
+      when: bare_metal_services | default(false) | bool
+      ansible.builtin.include_role:
+        name: reserve-ocp-bmc
+
     - name: Start VM
       ansible.builtin.command:
         cmd: virsh start {{ ocp_vm_name }}

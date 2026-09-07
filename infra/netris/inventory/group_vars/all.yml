@@ -163,7 +163,7 @@ bare_metal_services: false
 bmc_net_name: "bmc-net"
 bmc_net_bridge: "br-bmc"
 bmc_net_host_ip: "10.99.0.1"
-# Static DHCP lease reserved for the OCP management-cluster VM by setup-bmc.
+# Static DHCP lease reserved for the OCP management-cluster VM before it boots.
 # Keep it at the edge of the subnet, outside the intended dynamic range.
 bmc_net_ocp_ip: "10.99.0.254"
 bmc_net_cidr: "10.99.0.0/24"

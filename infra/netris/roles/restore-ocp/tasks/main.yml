@@ -411,6 +411,11 @@
     cmd: virsh setmem {{ ocp_vm_name }} {{ ocp_server_memory_gb }}G --config
   when: (_current_mem_kb.stdout | int / 1048576) | round(0) | int != ocp_server_memory_gb | int
 
+- name: Reserve OCP VM bmc-net address before boot
+  when: bare_metal_services | default(false) | bool
+  ansible.builtin.include_role:
+    name: reserve-ocp-bmc
+
 - name: Boot VM
   ansible.builtin.command:
     cmd: virsh start {{ ocp_vm_name }}

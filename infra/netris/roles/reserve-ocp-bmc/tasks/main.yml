@@ -1,0 +1,41 @@
+---
+# Reserve the OCP management-cluster VM's bmc-net address before the VM boots.
+# cloud-init obtains this address with DHCP, and Ironic uses it as its
+# provisioning endpoint. Keeping the reservation in a separate role lets both
+# OCP boot paths apply it before starting the VM.
+
+- name: Discover OCP VM bmc-net MAC
+  ansible.builtin.shell:
+    cmd: >-
+      virsh domiflist {{ ocp_vm_name_pattern }} | grep {{ bmc_net_name }} | awk '{print $5}'
+  register: _ocp_bmc_mac
+  until: _ocp_bmc_mac.stdout | trim | length > 0
+  retries: 10
+  delay: 5
+
+- name: Ensure static DHCP lease for OCP VM bmc-net address
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      network='{{ bmc_net_name }}'
+      mac='{{ _ocp_bmc_mac.stdout | trim }}'
+      ip='{{ bmc_net_ocp_ip }}'
+
+      if virsh net-dumpxml "$network" \
+        | grep -F "mac='$mac'" \
+        | grep -F -q "ip='$ip'"; then
+        echo "static DHCP lease already present"
+        exit 0
+      fi
+
+      # Remove an old reservation for this MAC or address before adding the
+      # current reservation. Both forms are harmless when no entry exists.
+      virsh net-update "$network" delete ip-dhcp-host \
+        "<host mac='$mac'/>" --live --config || true
+      virsh net-update "$network" delete ip-dhcp-host \
+        "<host ip='$ip'/>" --live --config || true
+      virsh net-update "$network" add ip-dhcp-host \
+        "<host mac='$mac' ip='$ip'/>" --live --config
+      echo "static DHCP lease added"
+  register: _ocp_bmc_lease
+  changed_when: "'static DHCP lease added' in _ocp_bmc_lease.stdout"
