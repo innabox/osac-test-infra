@@ -495,13 +495,26 @@ jobs:
           LISTENER_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          # Read-only here -- must NOT write a fallback into the shared
+          # DIAGNOSIS_FILE itself (unlike the similarly-shaped check in
+          # "Prepare comment section" below). diagnosis.md is also read by
+          # "Prepare comment section" (which only generates its own
+          # titled "# ... AI Diagnosis | Category: ..." fallback when the
+          # file is still genuinely empty) and by "Track recurring-failure
+          # candidate" -- if this step claimed the file first, both of
+          # those would see a non-empty file and skip their own, more
+          # informative handling, silently losing the diagnosis title
+          # from the PR comment for exactly the run that most needs one
+          # (a hard failure before ai-diagnose-failure.py ever got to
+          # write it).
           DIAGNOSIS_FILE="${RUNNER_TEMP}/diagnosis.md"
-          if [[ ! -s "${DIAGNOSIS_FILE}" ]]; then
-            echo "AI diagnosis unavailable for this run." > "${DIAGNOSIS_FILE}"
-          fi
-          SNIPPET=$(tr '\n' ' ' <"${DIAGNOSIS_FILE}" | cut -c1-137)
-          if [[ "$(wc -c <"${DIAGNOSIS_FILE}")" -gt 137 ]]; then
-            SNIPPET="${SNIPPET}..."
+          if [[ -s "${DIAGNOSIS_FILE}" ]]; then
+            SNIPPET=$(tr '\n' ' ' <"${DIAGNOSIS_FILE}" | cut -c1-137)
+            if [[ "$(wc -c <"${DIAGNOSIS_FILE}")" -gt 137 ]]; then
+              SNIPPET="${SNIPPET}..."
+            fi
+          else
+            SNIPPET="AI diagnosis unavailable for this run."
           fi
           # Built with jq (not shell interpolation) so LLM-generated diagnosis
           # text -- untrusted output -- is never treated as anything but a

@@ -748,6 +748,7 @@ jobs:
         id: vertex-auth
 
       - name: Run AI failure diagnosis
+        id: diagnose-script
         if: failure() && inputs.enable-ai-diagnostic
         continue-on-error: true # must never block Teardown below
         shell: bash
@@ -791,14 +792,21 @@ jobs:
 
       - name: Prepare AI diagnosis for Slack
         id: prepare-diagnosis-text
-        if: always() && failure() && inputs.notify-on-failure && steps.notify-slack.outputs.message-ts != ''
+        if: >-
+          always() && failure() && inputs.notify-on-failure &&
+          steps.notify-slack.outputs.message-ts != '' &&
+          steps.diagnose-script.outputs.diagnosis-available == 'true'
         continue-on-error: true # a formatting bug here must not lose the Slack thread
         uses: ./.github/actions/prepare-diagnosis-for-slack
         with:
           diagnosis-file: ${{ runner.temp }}/ai-diagnosis.md
 
       - name: Post AI diagnosis to Slack thread
-        if: always() && failure() && inputs.notify-on-failure && steps.notify-slack.outputs.message-ts != ''
+        if: >-
+          always() && failure() && inputs.notify-on-failure &&
+          steps.notify-slack.outputs.message-ts != '' &&
+          steps.diagnose-script.outputs.diagnosis-available == 'true' &&
+          steps.prepare-diagnosis-text.outcome == 'success'
         continue-on-error: true # must never block the job on a Slack hiccup
         uses: ./.github/actions/post-slack-thread-reply
         with:
@@ -807,8 +815,17 @@ jobs:
           thread-ts: ${{ steps.notify-slack.outputs.message-ts }}
           message-text: ${{ steps.prepare-diagnosis-text.outputs.text }}
 
+      # No point pinging chai-bot to "verify" a failure reason we don't
+      # actually have -- diagnosis-available is False for both Gemini's
+      # own empty-response placeholder text (every retry exhausted) and
+      # the exception-fallback message, neither of which has a real root
+      # cause to check.
       - name: Ping chai-bot to verify failure
-        if: always() && failure() && inputs.notify-on-failure && steps.notify-slack.outputs.message-ts != ''
+        if: >-
+          always() && failure() && inputs.notify-on-failure &&
+          steps.notify-slack.outputs.message-ts != '' &&
+          steps.diagnose-script.outputs.diagnosis-available == 'true' &&
+          steps.prepare-diagnosis-text.outcome == 'success'
         continue-on-error: true # must never block the job on a Slack hiccup
         uses: ./.github/actions/ping-chai-bot-to-verify-failure
         with:

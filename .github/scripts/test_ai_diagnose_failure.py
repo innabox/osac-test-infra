@@ -17,6 +17,8 @@ module load time, so these tests never need real Vertex AI credentials).
 import importlib.util
 import os
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-project")
 os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "test-location")
@@ -153,6 +155,117 @@ class ReadArtifactFileSandboxTests(unittest.TestCase):
         self.assertEqual(result, "real content\n")
 
 
+def _fake_resp(text, finish_reason="STOP"):
+    return SimpleNamespace(
+        text=text,
+        candidates=[SimpleNamespace(finish_reason=finish_reason)],
+        prompt_feedback=None,
+        usage_metadata=object(),
+    )
+
+
+class FakeChat:
+    """Stands in for google.genai's Chat: send_message() pops the next
+    canned response off a queue, in order, regardless of what prompt text
+    it's called with -- these tests only care about how many attempts
+    _generate_with_retry makes and what it does with each result.
+    """
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def send_message(self, _prompt):
+        self.calls += 1
+        return self._responses.pop(0)
+
+
+class GenerateWithRetryTests(unittest.TestCase):
+    def setUp(self):
+        # Never actually sleep in tests -- MAX_RETRIES=5 with real
+        # exponential backoff would make this suite slow for no benefit.
+        self.sleep_patcher = mock.patch.object(ai_diagnose_failure.time, "sleep")
+        self.sleep_patcher.start()
+        self.addCleanup(self.sleep_patcher.stop)
+
+    def test_succeeds_on_first_attempt_no_retry(self):
+        chat = FakeChat([_fake_resp("a real diagnosis")])
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(chat, "prompt")
+        self.assertEqual(chat.calls, 1)
+        self.assertFalse(incomplete)
+        self.assertEqual(resp.text, "a real diagnosis")
+        self.assertEqual(len(usage), 1)
+
+    def test_succeeds_partway_through_retries(self):
+        # Empty, empty, then a real answer on the 3rd attempt (2nd retry)
+        # -- must not give up early just because MAX_RETRIES allows more.
+        chat = FakeChat(
+            [_fake_resp(""), _fake_resp(""), _fake_resp("finally a real diagnosis")]
+        )
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(chat, "prompt")
+        self.assertEqual(chat.calls, 3)
+        self.assertFalse(incomplete)
+        self.assertEqual(resp.text, "finally a real diagnosis")
+        self.assertEqual(len(usage), 3)
+
+    def test_gives_up_after_max_retries_all_empty(self):
+        chat = FakeChat([_fake_resp("") for _ in range(ai_diagnose_failure.MAX_RETRIES + 1)])
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(chat, "prompt")
+        # 1 initial attempt + MAX_RETRIES retries, no more.
+        self.assertEqual(chat.calls, ai_diagnose_failure.MAX_RETRIES + 1)
+        self.assertTrue(incomplete)
+        self.assertEqual(resp.text, "")
+        self.assertEqual(len(usage), ai_diagnose_failure.MAX_RETRIES + 1)
+
+    def test_blocked_response_skips_every_retry(self):
+        chat = FakeChat([_fake_resp("", finish_reason="SAFETY")])
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(chat, "prompt")
+        self.assertEqual(chat.calls, 1)
+        self.assertTrue(incomplete)
+        self.assertEqual(len(usage), 1)
+
+    def test_blocked_retry_still_prefers_earlier_nonempty_attempt(self):
+        # First attempt hit MAX_TOKENS but has real partial text; the
+        # retry then gets hard-blocked (SAFETY) with empty text -- the
+        # blocked, empty retry must not win just by being last and
+        # stopping the loop; the earlier partial answer is still useful.
+        chat = FakeChat(
+            [
+                _fake_resp("a partial but real answer", finish_reason="MAX_TOKENS"),
+                _fake_resp("", finish_reason="SAFETY"),
+            ]
+        )
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(chat, "prompt")
+        self.assertEqual(chat.calls, 2)
+        self.assertTrue(incomplete)
+        self.assertEqual(resp.text, "a partial but real answer")
+        self.assertEqual(len(usage), 2)
+
+    def test_blocked_retry_falls_back_to_itself_when_nothing_earlier_has_text(self):
+        chat = FakeChat([_fake_resp(""), _fake_resp("", finish_reason="SAFETY")])
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(chat, "prompt")
+        self.assertEqual(chat.calls, 2)
+        self.assertTrue(incomplete)
+        self.assertEqual(resp.text, "")
+
+    def test_prefers_last_attempt_with_text_when_all_incomplete(self):
+        # Middle attempt has SOME text but hit MAX_TOKENS (still counts as
+        # incomplete) -- the final, totally empty attempt must not win
+        # just because it's last; the more useful partial answer should.
+        chat = FakeChat(
+            [
+                _fake_resp(""),
+                _fake_resp("a partial but real answer", finish_reason="MAX_TOKENS"),
+                _fake_resp(""),
+            ]
+            + [_fake_resp("") for _ in range(ai_diagnose_failure.MAX_RETRIES - 2)]
+        )
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(chat, "prompt")
+        self.assertTrue(incomplete)
+        self.assertEqual(resp.text, "a partial but real answer")
+        self.assertEqual(chat.calls, ai_diagnose_failure.MAX_RETRIES + 1)
+
+
 _FULL_DIAGNOSIS = """### Root cause
 The storage-tier test failed because the CSI driver never provisioned the PVC in time.
 
@@ -202,6 +315,17 @@ class SplitSectionsTests(unittest.TestCase):
         self.assertIsNone(causal_chain)
         self.assertIn("line", evidence)
 
+    def test_causal_chain_without_evidence_is_retained(self):
+        # A model that produced Root cause + Causal chain but stopped
+        # there (never reached "### Evidence" at all) -- the causal chain
+        # must still come back, not silently drop to None just because
+        # there's no following heading to bound it against.
+        diagnosis = "### Root cause\nSomething broke.\n\n### Causal chain\n- a\n- b"
+        summary, causal_chain, evidence, _footer = ai_diagnose_failure.split_sections(diagnosis)
+        self.assertEqual(summary, "Something broke.")
+        self.assertEqual(causal_chain, "- a\n- b")
+        self.assertIsNone(evidence)
+
 
 class CollapseTests(unittest.TestCase):
     def test_wraps_in_its_own_details_block(self):
@@ -214,9 +338,10 @@ class CollapseTests(unittest.TestCase):
 
 class BuildDiagnosisBodyTests(unittest.TestCase):
     def test_full_structure_causal_chain_and_evidence_each_own_collapse(self):
-        body = ai_diagnose_failure.build_diagnosis_body(
+        body, available = ai_diagnose_failure.build_diagnosis_body(
             _FULL_DIAGNOSIS, "https://example.com/run/1", "E2E Storage", "STORAGE"
         )
+        self.assertTrue(available)
         self.assertTrue(body.startswith("# ❌ E2E Storage -- AI Diagnosis | Category: `STORAGE`"))
         # No separate Conclusion section anymore.
         self.assertNotIn("Conclusion", body)
@@ -243,17 +368,59 @@ class BuildDiagnosisBodyTests(unittest.TestCase):
         # Confidence is never collapsed -- must sit after the LAST </details>.
         self.assertGreater(confidence_idx, last_details_close)
 
-    def test_exception_fallback_has_title_and_link(self):
-        body = ai_diagnose_failure.build_diagnosis_body(
+    def test_exception_fallback_has_title_and_link_but_unavailable(self):
+        body, available = ai_diagnose_failure.build_diagnosis_body(
             "_AI diagnosis unavailable: boom_", "https://example.com/run/1", "E2E VMaaS", None
         )
+        self.assertFalse(available)
         self.assertTrue(body.startswith("# ❌ E2E VMaaS -- AI Diagnosis | Category: `UNKNOWN`"))
         self.assertIn("_AI diagnosis unavailable: boom_", body)
         self.assertIn("To see the full run", body)
 
+    def test_empty_gemini_response_is_unavailable(self):
+        body, available = ai_diagnose_failure.build_diagnosis_body(
+            "(empty response from Gemini: finish_reason=FinishReason.STOP)",
+            "https://example.com/run/1",
+            "E2E VMaaS",
+            None,
+        )
+        self.assertFalse(available)
+        self.assertIn("(empty response from Gemini", body)
+
     def test_no_run_url_omits_full_run_line(self):
-        body = ai_diagnose_failure.build_diagnosis_body(_FULL_DIAGNOSIS, "", "E2E CaaS", "OSAC_OPERATOR")
+        body, available = ai_diagnose_failure.build_diagnosis_body(_FULL_DIAGNOSIS, "", "E2E CaaS", "OSAC_OPERATOR")
+        self.assertTrue(available)
         self.assertNotIn("To see the full run", body)
+
+    def test_incomplete_forces_unavailable_even_with_root_cause_structure(self):
+        # A response can hit MAX_TOKENS/get blocked/come back empty even
+        # after every _generate_with_retry attempt, yet still have a
+        # well-formed "### Root cause" section in its partial text (e.g.
+        # cut off after Causal chain but before Evidence/Confidence).
+        # incomplete=True must force diagnosis_available=False regardless
+        # of what split_sections finds -- the structured rendering itself
+        # is unaffected (still shown, still useful to a human reading the
+        # step summary), only the availability flag used to gate Slack/
+        # chai-bot changes.
+        diagnosis = (
+            "### Root cause\nSomething broke.\n\n"
+            "### Causal chain\n- a\n- b\n\n"
+            "<sub>⚠️ Incomplete: Gemini's response was empty, cut off, or "
+            "blocked -- treat as incomplete | Confidence: not reported by the model</sub>"
+        )
+        body, available = ai_diagnose_failure.build_diagnosis_body(
+            diagnosis, "https://example.com/run/1", "E2E VMaaS", "OSAC_OPERATOR", incomplete=True
+        )
+        self.assertFalse(available)
+        # Still gets the normal structured rendering -- only availability changed.
+        self.assertIn("Something broke.", body)
+        self.assertIn("<summary><sub>Causal chain</sub></summary>", body)
+
+    def test_complete_diagnosis_stays_available(self):
+        body, available = ai_diagnose_failure.build_diagnosis_body(
+            _FULL_DIAGNOSIS, "https://example.com/run/1", "E2E Storage", "STORAGE", incomplete=False
+        )
+        self.assertTrue(available)
 
 
 if __name__ == "__main__":
