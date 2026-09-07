@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Refresh OSAC on the snapshot cluster with agentless-net values.
-# Clones the osac mono-repo, merges caas-ci base values with the
-# agentless-net overlay, and runs refresh-after-snapshot.py.
+# Clones the osac mono-repo, deep-merges the agentless-net overlay
+# into the cloned caas-ci infra.yaml and instance.yaml in-place,
+# then installs OSAC via the osac-installer Makefile.
 # Corresponds to setup-lab.sh steps 7-10.
 # Idempotent — safe to re-run.
 #
@@ -15,7 +16,7 @@ INFRA_DIR="${SCRIPT_DIR}/.."
 source "${INFRA_DIR}/.mgmt-network"
 
 OSAC_NAMESPACE="${OSAC_NAMESPACE:-osac-e2e-ci}"
-OSAC_VALUES_FILE="${OSAC_VALUES_FILE:-values/caas-ci/values.yaml}"
+OSAC_PROFILE="${OSAC_PROFILE:-caas-ci}"
 OSAC_REPO="${OSAC_REPO:-https://github.com/osac-project/osac.git}"
 OSAC_BRANCH="${OSAC_BRANCH:-main}"
 OSAC_DIR="/opt/osac"
@@ -43,11 +44,9 @@ fi
 
 # ---------- merge values overlay ----------
 
-MERGED_VALUES_DIR="${INSTALLER_DIR}/values/agentless-net-ci"
-MERGED_VALUES="${MERGED_VALUES_DIR}/values.yaml"
-mkdir -p "$MERGED_VALUES_DIR"
+PROFILE_DIR="${INSTALLER_DIR}/values/${OSAC_PROFILE}"
 
-info "Merging values overlay with ${OSAC_VALUES_FILE}..."
+info "Deep-merging values overlay into cloned ${OSAC_PROFILE} profile..."
 python3 -c "
 import yaml, sys, copy
 
@@ -61,22 +60,22 @@ def deep_merge(base, overlay):
     return result
 
 with open(sys.argv[1]) as f:
-    base = yaml.safe_load(f)
-with open(sys.argv[2]) as f:
     overlay = yaml.safe_load(f)
 
-merged = deep_merge(base, overlay)
+for values_file in ('infra.yaml', 'instance.yaml'):
+    path = sys.argv[2] + '/' + values_file
+    with open(path) as f:
+        base = yaml.safe_load(f)
+    merged = deep_merge(base, overlay)
+    with open(path, 'w') as f:
+        yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
+    print(f'  Merged overlay into {path}')
+" "$VALUES_OVERLAY" "$PROFILE_DIR"
 
-with open(sys.argv[3], 'w') as f:
-    yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
-
-print(f'  Merged {sys.argv[1]} + {sys.argv[2]} -> {sys.argv[3]}')
-" "${INSTALLER_DIR}/${OSAC_VALUES_FILE}" "$VALUES_OVERLAY" "$MERGED_VALUES"
-
-# Copy pull-secret and license into the merged values directory
+# Copy pull-secret and license into the profile values directory
 AAP_LICENSE="${AAP_LICENSE_PATH:-/root/aap-license.zip}"
-cp "$PULL_SECRET" "${MERGED_VALUES_DIR}/pull-secret.json"
-cp "$AAP_LICENSE" "${MERGED_VALUES_DIR}/license.zip"
+cp "$PULL_SECRET" "${PROFILE_DIR}/pull-secret.json"
+cp "$AAP_LICENSE" "${PROFILE_DIR}/license.zip"
 
 # ---------- step 8: install OSAC ----------
 
@@ -87,8 +86,9 @@ else
     (cd "$INSTALLER_DIR" && \
         KUBECONFIG="$KUBECONFIG" \
         make install \
-            INSTALLER_NAMESPACE="$OSAC_NAMESPACE" \
-            VALUES_FILE=values/agentless-net-ci/values.yaml)
+            PLATFORM=openshift \
+            PROFILE="$OSAC_PROFILE" \
+            NS="$OSAC_NAMESPACE")
 fi
 
 # ---------- step 9: patch DNS credentials ----------

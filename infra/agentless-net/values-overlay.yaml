@@ -1,5 +1,5 @@
-# Merged on top of osac-installer/values/caas-ci/values.yaml at deploy time.
-# Only contains keys that differ from the caas-ci base.
+# Deep-merged in-place into the cloned caas-ci infra.yaml and instance.yaml
+# at deploy time. Only contains keys that differ from the caas-ci base.
 
 # Disable Kafka/metering — not needed for agentless-net and the snapshot
 # doesn't have Strimzi CRDs installed.
