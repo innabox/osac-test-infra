@@ -67,7 +67,7 @@ fi
 CLUSTER_TOOL_DIR="/opt/cluster-tool"
 CLUSTER_TOOL_BIN="/usr/local/bin/cluster-tool"
 
-if ! command -v cluster-tool &>/dev/null; then
+if [[ ! -x "${CLUSTER_TOOL_BIN}" ]]; then
     info "Installing cluster-tool..."
     if [[ -d "${CLUSTER_TOOL_DIR}" ]]; then
         git -C "${CLUSTER_TOOL_DIR}" pull --ff-only
