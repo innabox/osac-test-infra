@@ -5,10 +5,32 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
+      pr-number:
+        description: "PR number being tested"
+        required: false
+        default: ""
+      pr-repository:
+        description: "Repository containing the PR head, including a fork"
+        required: false
+        default: ""
+      pr-ref:
+        description: "PR head branch/ref"
+        required: false
+        default: ""
+      pr-sha:
+        description: "Expected immutable PR head SHA"
+        required: false
+        default: ""
+      fork-pr-author-association:
+        description: "PR author association used by fork authorization"
+        required: false
+        default: ""
+      fork-pr-author:
+        description: "PR author login used by fork authorization"
+        required: false
+        default: ""
       instance-type:
         description: "EC2 instance type -- curated allow-list, not free text, so a dispatch can't accidentally launch an unexpectedly expensive type."
         required: false
@@ -50,8 +72,8 @@ on:
         default: ""
 
 concurrency:
-  group: e2e-bmaas-netris-full-install-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: e2e-bmaas-netris-full-install-${{ inputs.pr-repository || github.repository }}-${{ inputs.pr-number || github.run_id }}-${{ inputs.pr-sha || github.sha }}
+  cancel-in-progress: false
 
 jobs:
   e2e-bmaas-netris:
@@ -66,6 +88,12 @@ jobs:
       bmf-operator-image: ${{ inputs.bmf-operator-image || '' }}
       osac-repo: ${{ inputs.osac-repo || '' }}
       osac-branch: ${{ inputs.osac-branch || '' }}
-      fork-pr-author-association: ${{ github.event.pull_request.head.repo.fork && github.event.pull_request.author_association || '' }}
-      fork-pr-author: ${{ github.event.pull_request.head.repo.fork && github.event.pull_request.user.login || '' }}
-      pr-number: ${{ github.event.pull_request.number }}
+      test-infra-repository: ${{ inputs.pr-repository || github.repository }}
+      test-infra-ref: ${{ inputs.pr-ref || github.ref }}
+      test-infra-sha: ${{ inputs.pr-sha || '' }}
+      pr-repository: ${{ inputs.pr-repository || '' }}
+      pr-ref: ${{ inputs.pr-ref || '' }}
+      pr-sha: ${{ inputs.pr-sha || '' }}
+      fork-pr-author-association: ${{ inputs.fork-pr-author-association || '' }}
+      fork-pr-author: ${{ inputs.fork-pr-author || '' }}
+      pr-number: ${{ inputs.pr-number || '' }}
