@@ -73,6 +73,31 @@ on:
         required: false
         type: string
         default: ""
+      test-infra-ref:
+        description: "Branch, tag, or commit of the test-infra repository to checkout"
+        required: false
+        type: string
+        default: ""
+      test-infra-sha:
+        description: "Exact commit SHA of the test-infra repository to checkout"
+        required: false
+        type: string
+        default: ""
+      pr-repository:
+        description: "Repository containing the expected PR head"
+        required: false
+        type: string
+        default: ""
+      pr-ref:
+        description: "Expected PR head branch/ref"
+        required: false
+        type: string
+        default: ""
+      pr-sha:
+        description: "Expected immutable PR head SHA"
+        required: false
+        type: string
+        default: ""
       fork-pr-author-association:
         description: "PR author_association from the caller"
         required: false
@@ -99,11 +124,13 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.test-infra-repository || github.repository }}
+          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || github.ref }}
           persist-credentials: false
 
       - name: Validate and bootstrap
@@ -122,6 +149,34 @@ jobs:
           fork-pr-author: ${{ inputs.fork-pr-author }}
           pr-number: ${{ inputs.pr-number }}
 
+      - name: Validate pull request revision
+        if: inputs.pr-number != '' && inputs.pr-sha != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          EXPECTED_SHA: ${{ inputs.pr-sha }}
+          EXPECTED_REF: ${{ inputs.pr-ref }}
+          EXPECTED_REPOSITORY: ${{ inputs.pr-repository }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+          actual_sha=$(jq -r '.head.sha' <<<"${pr_json}")
+          actual_ref=$(jq -r '.head.ref' <<<"${pr_json}")
+          actual_repository=$(jq -r '.head.repo.full_name' <<<"${pr_json}")
+          [[ "${actual_sha}" == "${EXPECTED_SHA}" ]] || {
+            echo "::error::PR head SHA changed; refusing to provision."
+            exit 1
+          }
+          [[ -z "${EXPECTED_REPOSITORY}" || "${actual_repository}" == "${EXPECTED_REPOSITORY}" ]] || {
+            echo "::error::PR head repository changed; refusing to provision."
+            exit 1
+          }
+          [[ -z "${EXPECTED_REF}" || "${actual_ref}" == "${EXPECTED_REF}" ]] || {
+            echo "::error::PR head ref changed; refusing to provision."
+            exit 1
+          }
+
   provision:
     needs: authorize
     uses: ./.github/workflows/ec2-runner-provision.yml
@@ -133,6 +188,8 @@ jobs:
       orchestrator-runner-label: ${{ inputs.orchestrator-runner-label }}
       tooling-check-cmds: ${{ inputs.tooling-check-cmds }}
       test-infra-repository: ${{ inputs.test-infra-repository }}
+      test-infra-ref: ${{ inputs.test-infra-ref }}
+      test-infra-sha: ${{ inputs.test-infra-sha }}
 
   push-secrets:
     needs: provision
@@ -147,6 +204,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.test-infra-repository || github.repository }}
+          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || github.ref }}
           persist-credentials: false
 
       - name: Validate and bootstrap
@@ -213,6 +271,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.test-infra-repository || github.repository }}
+          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || github.ref }}
           persist-credentials: false
 
       - name: Validate component image override inputs
@@ -475,3 +534,5 @@ jobs:
       orchestrator-runner-label: ${{ inputs.orchestrator-runner-label }}
       aws-region: ${{ inputs.aws-region }}
       test-infra-repository: ${{ inputs.test-infra-repository }}
+      test-infra-ref: ${{ inputs.test-infra-ref }}
+      test-infra-sha: ${{ inputs.test-infra-sha }}

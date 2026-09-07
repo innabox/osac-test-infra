@@ -37,6 +37,16 @@ on:
         required: false
         type: string
         default: ""
+      test-infra-ref:
+        description: "Branch, tag, or commit of the test-infra repository to checkout"
+        required: false
+        type: string
+        default: ""
+      test-infra-sha:
+        description: "Exact commit SHA of the test-infra repository to checkout"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   teardown:
@@ -62,6 +72,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.test-infra-repository || github.repository }}
+          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || github.ref }}
           persist-credentials: false
 
       - name: Validate and bootstrap
