@@ -273,12 +273,52 @@ def build_graphify_context(ambiguous_files, deterministic_files):
 
 
 DECISION_BLOCK_RE = re.compile(
-    r"^VMAAS:[ \t]*(skip|sanity|regression)[ \t]*\r?\n"
-    r"^CAAS:[ \t]*(skip|sanity|regression)[ \t]*\r?\n"
-    r"^BMAAS:[ \t]*(skip|sanity|regression)[ \t]*\r?\n"
+    r"^VMAAS:[ \t]*(skip|sanity|regression)[ \t]*\|[ \t]*(.+?)[ \t]*\r?\n"
+    r"^CAAS:[ \t]*(skip|sanity|regression)[ \t]*\|[ \t]*(.+?)[ \t]*\r?\n"
+    r"^BMAAS:[ \t]*(skip|sanity|regression)[ \t]*\|[ \t]*(.+?)[ \t]*\r?\n"
     r"^CONFIDENCE:[ \t]*(\d{1,3})[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+MAX_REASON_CHARS = 100
+
+
+def _sanitize_reason(text):
+    """A per-suite reason is Gemini's own generated text -- shaped by, and
+    potentially echoing content from, the attacker-controlled PR diff it
+    was asked to reason about. Apply the same defenses already used for
+    every other piece of PR-influenced content that ends up in the posted
+    comment: neutralize fence-breaking backtick runs, collapse embedded
+    newlines (a reason is one line of a markdown table row), escape literal
+    "\\" and "|" (in that order -- would otherwise break the table's column
+    structure, including via a pre-existing "\|" sequence that naive
+    pipe-only escaping would turn into an unescaped delimiter), escape
+    "[", "]", "<", ">" (would otherwise let a crafted filename or a
+    diff-influenced Gemini reason render as a clickable Markdown link/
+    autolink in this bot-authored PR comment -- a phishing/social-
+    engineering surface, not just a formatting one), and cap length -- the
+    user explicitly asked for short reasons, and this is the hard backstop
+    if the model ignores that.
+    """
+    text = _neutralize_fences(text)
+    text = " ".join(text.split())
+    # Escape backslashes BEFORE every other character below: escaping any of
+    # them alone would turn a pre-existing "\X" in the text into "\\X", which
+    # CommonMark reads as an escaped backslash followed by an UNescaped X --
+    # silently undoing the very escaping this line exists to guarantee.
+    # Doubling backslashes first means each character's own escaping
+    # backslash can never be absorbed into escaping an earlier, unrelated
+    # backslash. The bracket/angle-bracket escapes block explicit Markdown
+    # link ("[text](url)") and autolink ("<url>") syntax; they don't stop
+    # GitHub's separate plain-text autolinking of a bare "http://" URL, which
+    # character escaping alone can't address -- out of scope for this
+    # short, factual field.
+    text = text.replace("\\", "\\\\")
+    for special in ("|", "[", "]", "<", ">"):
+        text = text.replace(special, "\\" + special)
+    if len(text) > MAX_REASON_CHARS:
+        text = text[: MAX_REASON_CHARS - 1].rstrip() + "…"
+    return text
 
 
 # Populated by call_gemini with one entry per generate_content attempt
@@ -364,36 +404,47 @@ def call_gemini(contents):
 
 def parse_gemini_decisions(text):
     """Only accept a single, complete, TERMINAL four-line block ("VMAAS:
-    ...\\nCAAS: ...\\nBMAAS: ...\\nCONFIDENCE: ...", in that fixed order,
-    with nothing but trailing whitespace after it). The PR diff -- fully
-    attacker-controlled -- is embedded directly in the prompt text, so a
-    crafted diff could contain lines shaped like "VMAAS: skip" that a
-    model might quote back while reasoning before its real answer; the
-    old per-line-anywhere-in-the-text regex (with last-match-wins on
-    duplicates) could pick up such a stray line instead of the genuine
-    terminal verdict. Requiring one fixed-order block, at the very end
-    of the response, makes a duplicate/partial/quoted block structurally
-    unable to match at all: if the true terminal block is missing or
-    incomplete, this returns {} (no decisions), same as an outright
-    unparseable response, so main()'s existing fail-open sentinel
-    handling (`if not response_text or not gemini_decisions`) applies
-    unchanged.
+    ...|...\\nCAAS: ...|...\\nBMAAS: ...|...\\nCONFIDENCE: ...", in that
+    fixed order, with nothing but trailing whitespace after it). The PR
+    diff -- fully attacker-controlled -- is embedded directly in the
+    prompt text, so a crafted diff could contain lines shaped like
+    "VMAAS: skip | ..." that a model might quote back while reasoning
+    before its real answer; the old per-line-anywhere-in-the-text regex
+    (with last-match-wins on duplicates) could pick up such a stray line
+    instead of the genuine terminal verdict. Requiring one fixed-order
+    block, at the very end of the response, makes a duplicate/partial/
+    quoted block structurally unable to match at all: if the true
+    terminal block is missing or incomplete -- including a suite line
+    missing its required "| <reason>" -- this returns ({}, {}, None), same
+    as an outright unparseable response, so main()'s existing fail-open
+    sentinel handling (`if not response_text or not gemini_decisions`)
+    applies unchanged.
+
+    Returns (decisions, reasons, confidence). `reasons[suite]` is
+    Gemini's own short, sanitized justification for that suite's verdict
+    (see _sanitize_reason) -- present for every suite whenever the block
+    matches at all, since the regex requires every line to carry one.
     """
     matches = list(DECISION_BLOCK_RE.finditer(text))
     if not matches:
-        return {}, None
+        return {}, {}, None
     match = matches[-1]
     if text[match.end() :].strip():
         # Something follows the last candidate block -- the prompt asks
         # for "nothing after them", so this isn't a genuine terminal
         # answer (could be an example the model quoted mid-reasoning).
-        return {}, None
+        return {}, {}, None
     decisions = {
         "vmaas": match.group(1).lower(),
-        "caas": match.group(2).lower(),
-        "bmaas": match.group(3).lower(),
+        "caas": match.group(3).lower(),
+        "bmaas": match.group(5).lower(),
     }
-    confidence = int(match.group(4))
+    reasons = {
+        "vmaas": _sanitize_reason(match.group(2)),
+        "caas": _sanitize_reason(match.group(4)),
+        "bmaas": _sanitize_reason(match.group(6)),
+    }
+    confidence = int(match.group(7))
     if not 0 <= confidence <= 100:
         # An out-of-range confidence means the model didn't actually follow
         # the requested format -- treat the whole block as unparseable
@@ -402,8 +453,8 @@ def parse_gemini_decisions(text):
         # `if not response_text or not gemini_decisions` check then routes
         # this through the same fail-open sentinel as any other malformed
         # response.
-        return {}, None
-    return decisions, confidence
+        return {}, {}, None
+    return decisions, reasons, confidence
 
 
 FENCE_RUN_RE = re.compile(r"`{3,}")
@@ -485,10 +536,13 @@ suite NOT marked "clearly relevant" is actually affected, say so -- do
 not default to "skip" just because the path-based check didn't flag it.
 
 End your response with EXACTLY these four lines, in this format, and
-nothing after them (used for automated parsing):
-VMAAS: <skip|sanity|regression>
-CAAS: <skip|sanity|regression>
-BMAAS: <skip|sanity|regression>
+nothing after them (used for automated parsing). Each suite line must
+include a short reason after "|" -- a few words, under 12 words, no
+newlines, explaining what specifically drove that decision (a file
+name, a marker, a graphify connection, "no evidence found"):
+VMAAS: <skip|sanity|regression> | <short reason>
+CAAS: <skip|sanity|regression> | <short reason>
+BMAAS: <skip|sanity|regression> | <short reason>
 CONFIDENCE: <0-100>
 """
 
@@ -560,7 +614,34 @@ aren't clearly named for either):
     ]
 
 
-def decide(context, gemini_decisions):
+def _deterministic_reason(files):
+    """Short, factual reason for a suite's deterministic verdict -- no AI
+    needed, since we already know exactly which files (if any) triggered
+    it. Caps to at most one example filename regardless of how many
+    matched, to stay short.
+
+    The filename is PR-author-controlled data (git permits "|", backtick
+    runs, and even embedded newlines in a path component) reaching the
+    posted comment directly, with no LLM in between -- sanitized through
+    the same _sanitize_reason() used for Gemini's own reasons, so a
+    crafted filename can't break the markdown table or forge a fence any
+    more than a crafted Gemini response already can't.
+    """
+    if not files:
+        return "No changed files matched a path rule for this suite"
+    if len(files) == 1:
+        reason = f"Matches: {files[0]}"
+    else:
+        reason = f"Matches {len(files)} files, e.g. {files[0]}"
+    # Sanitize the COMPLETE string (prefix included), not just the filename,
+    # so MAX_REASON_CHARS caps the actual final length exactly like it does
+    # for Gemini's own reasons -- sanitizing only the filename first let the
+    # fixed "Matches N files, e.g. " prefix ride along uncounted, so a
+    # 100-char filename could still produce a >100-char reason overall.
+    return _sanitize_reason(reason)
+
+
+def decide(context, gemini_decisions, gemini_reasons):
     """Merge the deterministic verdict with Gemini's (if it ran). A
     suite the deterministic layer already marked clear always runs at
     least at "sanity" -- Gemini can only escalate it to "regression", never
@@ -571,23 +652,34 @@ def decide(context, gemini_decisions):
     consistent with this pipeline's own "never silently skip on an
     inconclusive signal" principle -- even though this phase doesn't gate
     anything yet, the comment itself must stay honest).
+
+    Each result also carries a short "reason": for a deterministic verdict
+    it's derived directly from the matching file list (no AI needed); for
+    a suite Gemini actually judged, it's Gemini's own stated reason; a
+    deterministic-clear suite Gemini escalates to regression shows
+    Gemini's reason for the escalation instead of the baseline file-match
+    reason, since that's what actually explains the regression tier.
     """
     deterministic = context["deterministic"]
+    deterministic_files = context.get("deterministic_files", {})
     result = {}
     for suite in SUITES:
         clear = deterministic.get(suite, False)
         gemini_verdict = gemini_decisions.get(suite)
+        gemini_reason = gemini_reasons.get(suite)
         if clear:
-            result[suite] = {"decision": "regression" if gemini_verdict == "regression" else "sanity", "source": "deterministic"}
+            decision = "regression" if gemini_verdict == "regression" else "sanity"
+            reason = gemini_reason if decision == "regression" and gemini_reason else _deterministic_reason(deterministic_files.get(suite, []))
+            result[suite] = {"decision": decision, "source": "deterministic", "reason": reason}
         elif gemini_verdict is not None:
-            result[suite] = {"decision": gemini_verdict, "source": "gemini"}
+            result[suite] = {"decision": gemini_verdict, "source": "gemini", "reason": gemini_reason or "(no reason given)"}
         elif gemini_decisions:
             # Gemini ran (for some other suite/file) but never produced a
             # parseable verdict for THIS suite -- fail open, don't imply
             # "definitely not needed" from silence.
-            result[suite] = {"decision": "sanity", "source": "gemini-inconclusive"}
+            result[suite] = {"decision": "sanity", "source": "gemini-inconclusive", "reason": "AI judgment was inconclusive for this suite"}
         else:
-            result[suite] = {"decision": "skip", "source": "deterministic"}
+            result[suite] = {"decision": "skip", "source": "deterministic", "reason": "No changed files matched a path rule for this suite"}
     return result
 
 
@@ -614,12 +706,12 @@ def render_decision_table(decision, confidence, ai_status, cost_line=None):
     lines = [
         "# 🧭 E2E Suite Selection (POC, informational only)",
         "",
-        "| Suite | Decision | Source |",
-        "|---|---|---|",
+        "| Suite | Decision | Source | Reason |",
+        "|---|---|---|---|",
     ]
     for suite in SUITES:
         entry = decision[suite]
-        lines.append(f"| {suite.upper()} | {entry['decision']} | {entry['source']} |")
+        lines.append(f"| {suite.upper()} | {entry['decision']} | {entry['source']} | {entry.get('reason', '')} |")
     lines.append("")
     if ai_status == "used":
         conf_text = f"{confidence}%" if confidence is not None else "not reported"
@@ -672,6 +764,7 @@ def main():
     )
 
     gemini_decisions = {}
+    gemini_reasons = {}
     confidence = None
     ai_status = "not_needed"
     if needs_ai and not PR_DIFF_AVAILABLE:
@@ -692,7 +785,7 @@ def main():
         user_content = build_user_content(context, graphify_context)
         response_text = call_gemini(user_content)
         if response_text:
-            gemini_decisions, confidence = parse_gemini_decisions(response_text)
+            gemini_decisions, gemini_reasons, confidence = parse_gemini_decisions(response_text)
             if not gemini_decisions:
                 _safe_print(
                     f"WARNING: Gemini responded ({len(response_text)} chars) but no valid terminal "
@@ -732,7 +825,7 @@ def main():
         cost_line = format_cost_line(cost_usd, input_tokens, output_tokens, GEMINI_MODEL, complete=cost_complete)
         _safe_print(cost_line)
 
-    decision = decide(context, gemini_decisions)
+    decision = decide(context, gemini_decisions, gemini_reasons)
     table = render_decision_table(decision, confidence, ai_status=ai_status, cost_line=cost_line)
     with open(DECISION_FILE, "w") as f:
         f.write(table)
