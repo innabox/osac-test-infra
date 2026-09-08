@@ -142,18 +142,30 @@ def aggregate_cost(usage_metadata_list, model):
     incurred real, billed tokens that a last-attempt-only view would
     silently drop. Mirrors ai-diagnose-failure.py's aggregate_cost.
 
-    Skips (rather than aborting on) any attempt with no usable usage_metadata.
-    Returns (None, None, None) only if none of the attempts had usable token
-    counts.
+    Skips (rather than aborting on) any attempt with no usable usage_metadata,
+    but tracks that as `complete=False` in the returned tuple when at least
+    one OTHER attempt DID have usable data -- e.g. attempt 1 gets real usage
+    data with empty text, attempt 2 succeeds with text but its own response
+    object happens to lack usage_metadata. Silently summing only the
+    attempts that reported data would otherwise present a partial total as
+    if it were the full, complete cost of every attempt made.
+
+    Returns (cost_usd, input_tokens, output_tokens, complete). Returns
+    (None, None, None, True) if none of the attempts had usable token counts
+    at all -- "complete" there just means there's no partial data being
+    hidden, not that a real total was computed; format_cost_line's own
+    "unavailable" wording already covers that case honestly.
     """
     total_cost = 0.0
     total_input_tokens = 0
     total_output_tokens = 0
     any_usage = False
+    any_missing = False
     cost_known = True
     for usage_metadata in usage_metadata_list:
         cost_usd, input_tokens, output_tokens = compute_cost(usage_metadata, model)
         if input_tokens is None or output_tokens is None:
+            any_missing = True
             continue
         any_usage = True
         total_input_tokens += input_tokens
@@ -163,22 +175,29 @@ def aggregate_cost(usage_metadata_list, model):
         else:
             total_cost += cost_usd
     if not any_usage:
-        return None, None, None
+        return None, None, None, True
+    complete = not any_missing
     if not cost_known:
-        return None, total_input_tokens, total_output_tokens
-    return total_cost, total_input_tokens, total_output_tokens
+        return None, total_input_tokens, total_output_tokens, complete
+    return total_cost, total_input_tokens, total_output_tokens, complete
 
 
-def format_cost_line(cost_usd, input_tokens, output_tokens, model):
+def format_cost_line(cost_usd, input_tokens, output_tokens, model, complete=True):
     """Render aggregate_cost's numbers as a human-readable line. A bare
     "$0.0000" for the unavailable cases would look like a real (negligible)
     cost -- say so plainly instead of silently defaulting to 0.
+
+    complete=False (at least one attempt's usage data was missing while
+    another attempt's wasn't) labels the line as partial rather than
+    presenting a total that omits a real, already-billed attempt's cost
+    as if it were the full picture.
     """
     if input_tokens is None or output_tokens is None:
         return "Estimated cost: unavailable (no usage data -- Gemini was never actually invoked, or every attempt failed before returning usage data)"
+    prefix = "Estimated cost" if complete else "Estimated cost (partial -- at least one attempt's usage data was missing)"
     if cost_usd is None:
-        return f"Estimated cost: unavailable (no pricing data for model {model!r})"
-    return f"Estimated cost: ${cost_usd:.4f} ({input_tokens} input + {output_tokens} output tokens, {model})"
+        return f"{prefix}: unavailable (no pricing data for model {model!r})"
+    return f"{prefix}: ${cost_usd:.4f} ({input_tokens} input + {output_tokens} output tokens, {model})"
 
 
 def load_context():
@@ -504,7 +523,7 @@ def decide(context, gemini_decisions):
     return result
 
 
-def render_decision_table(decision, confidence, ai_status):
+def render_decision_table(decision, confidence, ai_status, cost_line=None):
     """ai_status is one of:
     - "not_needed" -- every file resolved deterministically, AI never invoked
     - "used" -- AI was invoked and produced a genuine, parseable judgment
@@ -514,6 +533,13 @@ def render_decision_table(decision, confidence, ai_status):
       one boolean previously rendered the identical "confidence: not
       reported" footer for a real, successful-but-unconfident judgment
       AND a run where AI never actually judged anything at all.
+
+    cost_line is None whenever ai_status == "not_needed" (nothing was
+    spent, no line to show) -- otherwise the same format_cost_line() string
+    also printed to the job log, appended here as a small <sub> line so
+    the cost is visible directly in the posted PR comment too, matching
+    ai-diagnose-failure.py's own confidence/cost footer convention rather
+    than leaving cost as something only visible in Actions logs.
     """
     lines = [
         "# 🧭 E2E Suite Selection (POC, informational only)",
@@ -537,6 +563,8 @@ def render_decision_table(decision, confidence, ai_status):
         )
     else:
         lines.append("_No AI judgment needed -- every changed file matched a clear, unambiguous path rule. This comment is informational only; nothing is gated on it yet._")
+    if cost_line:
+        lines.append(f"<sub>{cost_line}</sub>")
     return "\n".join(lines) + "\n"
 
 
@@ -591,16 +619,24 @@ def main():
         else:
             ai_status = "used"
 
+    cost_line = None
+    if needs_ai:
         # _last_usage_metadata carries one entry per generate_content
         # attempt call_gemini actually made (empty-response attempts
         # included -- each is billed regardless of whether it produced
         # usable text), so this reflects the real total cost of this run's
         # judgment, not just whichever attempt's text was ultimately used.
-        cost_usd, input_tokens, output_tokens = aggregate_cost(_last_usage_metadata, GEMINI_MODEL)
-        _safe_print(format_cost_line(cost_usd, input_tokens, output_tokens, GEMINI_MODEL))
+        # Computed here (not only inside the elif needs_ai: branch above)
+        # so the diff-unavailable path also gets a real "cost unavailable"
+        # line -- _last_usage_metadata correctly stays empty there since
+        # call_gemini was never invoked, matching format_cost_line's
+        # existing fail-open contract.
+        cost_usd, input_tokens, output_tokens, cost_complete = aggregate_cost(_last_usage_metadata, GEMINI_MODEL)
+        cost_line = format_cost_line(cost_usd, input_tokens, output_tokens, GEMINI_MODEL, complete=cost_complete)
+        _safe_print(cost_line)
 
     decision = decide(context, gemini_decisions)
-    table = render_decision_table(decision, confidence, ai_status=ai_status)
+    table = render_decision_table(decision, confidence, ai_status=ai_status, cost_line=cost_line)
     with open(DECISION_FILE, "w") as f:
         f.write(table)
     _safe_print(table)
