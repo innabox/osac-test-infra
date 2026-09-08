@@ -134,6 +134,35 @@ if [[ "${SKIP_LABEL_CHECK}" == "true" ]]; then
   fi
 fi
 
+lib_dir="$(dirname "${BASH_SOURCE[0]}")/../invalidate-e2e-gates"
+# shellcheck source=../invalidate-e2e-gates/e2e-gates-lib.sh
+source "${lib_dir}/e2e-gates-lib.sh"
+
+if all_merge_e2e_gates_green; then
+  {
+    if [[ "${SKIP_LABEL_CHECK}" == "true" ]]; then
+      echo "### E2E on CodeRabbit approval"
+      echo ""
+      echo "All merge-required e2e gates already success on HEAD — skipping replay."
+    else
+      echo "### E2E on \`${TRIGGER_LABEL}\`"
+      echo ""
+      echo "All merge-required e2e gates already success on HEAD — skipping replay."
+    fi
+    echo ""
+    echo "Accepted: \`e2e-vmaas-gate\`, \`e2e-bmaas-gate\`, \`e2e-caas-gate\` on \`${HEAD_SHA:0:7}\`."
+  } > /tmp/e2e-on-label-skip.md
+  gh pr comment "${PR_NUMBER}" -R "${REPO}" --body "$(cat /tmp/e2e-on-label-skip.md)"
+  exit 0
+fi
+
+if [[ "${SKIP_LABEL_CHECK}" == "true" ]]; then
+  export REASON="CodeRabbit approval - waiting for fresh full-install run"
+else
+  export REASON="${TRIGGER_LABEL} unlock - waiting for fresh full-install run"
+fi
+bash "${lib_dir}/invalidate-e2e-gates.sh"
+
 E2E_WORKFLOWS=()
 IFS=',' read -ra _wfs <<< "${WORKFLOWS}"
 for w in "${_wfs[@]}"; do

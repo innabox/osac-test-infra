@@ -1,0 +1,44 @@
+---
+name: Invalidate e2e merge gates
+description: >-
+  Mark required e2e-*-gate checks in_progress on a PR head SHA when unlock
+  replay is needed. Skips when all three gates already success on that SHA
+  (manual workflow_dispatch or PR runs). OSAC-3370 follow-up.
+
+inputs:
+  head-sha:
+    description: PR head commit SHA
+    required: true
+  reason:
+    description: Short title for the check output
+    required: false
+    default: E2E unlock - waiting for fresh full-install run
+  details-url:
+    description: Link shown on the check (defaults to this workflow run)
+    required: false
+    default: ""
+  skip-if-all-green:
+    description: Skip invalidation when all merge-required gates success on head-sha
+    required: false
+    default: "true"
+  github-token:
+    description: Token with checks:read and checks:write
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Invalidate e2e merge gates
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        REASON: ${{ inputs.reason }}
+        DETAILS_URL: ${{ inputs.details-url }}
+        SKIP_IF_ALL_GREEN: ${{ inputs.skip-if-all-green }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+      run: bash "${GITHUB_ACTION_PATH}/invalidate-e2e-gates.sh"
