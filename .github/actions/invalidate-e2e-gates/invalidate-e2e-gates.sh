@@ -57,4 +57,5 @@ done
 
 if [[ ${failed} -ne 0 ]]; then
   echo "Some e2e gates could not be invalidated; merge may still see stale greens." >&2
+  exit 1
 fi
