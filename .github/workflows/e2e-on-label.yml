@@ -90,6 +90,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/actions/e2e-start
+            .github/actions/invalidate-e2e-gates
       - uses: ./.github/actions/e2e-start
         with:
           pr-number: ${{ github.event.pull_request.number || inputs.pr_number || github.event.inputs.pr_number }}
