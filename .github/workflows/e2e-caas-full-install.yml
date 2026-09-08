@@ -14,6 +14,11 @@ on:
         required: false
         type: string
         default: ""
+      test-marker:
+        description: "pytest -m marker expression (e.g. sanity, regression). Empty runs all."
+        required: false
+        type: string
+        default: ""
       namespace:
         description: "OSAC namespace on the cluster"
         required: false
@@ -757,6 +762,7 @@ jobs:
         id: test
         env:
           TEST_FILTER: ${{ inputs.test-filter }}
+          TEST_MARKER: ${{ inputs.test-marker }}
           OSAC_NAMESPACE: ${{ inputs.namespace }}
           OSAC_CLUSTER_TEMPLATE: ${{ inputs.cluster-template }}
           E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
@@ -772,6 +778,17 @@ jobs:
           FILTER_ARGS=""
           if [ -n "${TEST_FILTER}" ]; then
             FILTER_ARGS="-k ${TEST_FILTER}"
+          fi
+
+          # Array, not a plain string: TEST_MARKER can be a compound pytest
+          # expression (e.g. "sanity or regression"), and unquoted string
+          # expansion below would word-split it into separate arguments --
+          # "or"/"regression" would then be misread as extra test paths
+          # instead of part of the -m expression. Matches
+          # e2e-bmaas-full-install.yml's existing MARKER_ARGS handling.
+          MARKER_ARGS=()
+          if [ -n "${TEST_MARKER}" ]; then
+            MARKER_ARGS=(-m "${TEST_MARKER}")
           fi
 
           mkdir -p "$RUNNER_TEMP/test-output"
@@ -791,7 +808,7 @@ jobs:
             -e OSAC_PULL_SECRET_PATH=/root/pull-secret \
             -e METERING_ADAPTER_URL="${METERING_ADAPTER_URL}" \
             "${E2E_IMAGE}" \
-            pytest ${TEST_ARGS} ${FILTER_ARGS} \
+            pytest ${TEST_ARGS} ${FILTER_ARGS} "${MARKER_ARGS[@]}" \
               --junitxml=/tmp/test-output/junit.xml -v
 
       - name: Gather artifacts
