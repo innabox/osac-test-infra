@@ -276,6 +276,7 @@ DECISION_BLOCK_RE = re.compile(
     r"^VMAAS:[ \t]*(skip|sanity|regression)[ \t]*\|[ \t]*(.+?)[ \t]*\r?\n"
     r"^CAAS:[ \t]*(skip|sanity|regression)[ \t]*\|[ \t]*(.+?)[ \t]*\r?\n"
     r"^BMAAS:[ \t]*(skip|sanity|regression)[ \t]*\|[ \t]*(.+?)[ \t]*\r?\n"
+    r"^NETRIS:[ \t]*(yes|no)[ \t]*\|[ \t]*(.+?)[ \t]*\r?\n"
     r"^CONFIDENCE:[ \t]*(\d{1,3})[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -403,37 +404,42 @@ def call_gemini(contents):
 
 
 def parse_gemini_decisions(text):
-    """Only accept a single, complete, TERMINAL four-line block ("VMAAS:
-    ...|...\\nCAAS: ...|...\\nBMAAS: ...|...\\nCONFIDENCE: ...", in that
-    fixed order, with nothing but trailing whitespace after it). The PR
-    diff -- fully attacker-controlled -- is embedded directly in the
-    prompt text, so a crafted diff could contain lines shaped like
-    "VMAAS: skip | ..." that a model might quote back while reasoning
-    before its real answer; the old per-line-anywhere-in-the-text regex
-    (with last-match-wins on duplicates) could pick up such a stray line
-    instead of the genuine terminal verdict. Requiring one fixed-order
-    block, at the very end of the response, makes a duplicate/partial/
-    quoted block structurally unable to match at all: if the true
+    """Only accept a single, complete, TERMINAL five-line block ("VMAAS:
+    ...|...\\nCAAS: ...|...\\nBMAAS: ...|...\\nNETRIS: yes|no|...\\n
+    CONFIDENCE: ...", in that fixed order, with nothing but trailing
+    whitespace after it). The PR diff -- fully attacker-controlled -- is
+    embedded directly in the prompt text, so a crafted diff could contain
+    lines shaped like "VMAAS: skip | ..." that a model might quote back
+    while reasoning before its real answer; the old per-line-anywhere-in-
+    the-text regex (with last-match-wins on duplicates) could pick up such
+    a stray line instead of the genuine terminal verdict. Requiring one
+    fixed-order block, at the very end of the response, makes a duplicate/
+    partial/quoted block structurally unable to match at all: if the true
     terminal block is missing or incomplete -- including a suite line
-    missing its required "| <reason>" -- this returns ({}, {}, None), same
-    as an outright unparseable response, so main()'s existing fail-open
-    sentinel handling (`if not response_text or not gemini_decisions`)
-    applies unchanged.
+    missing its required "| <reason>", or a missing NETRIS line -- this
+    returns ({}, {}, None, None), same as an outright unparseable response,
+    so main()'s existing fail-open sentinel handling (`if not response_text
+    or not gemini_decisions`) applies unchanged.
 
-    Returns (decisions, reasons, confidence). `reasons[suite]` is
+    Returns (decisions, reasons, netris, confidence). `reasons[suite]` is
     Gemini's own short, sanitized justification for that suite's verdict
     (see _sanitize_reason) -- present for every suite whenever the block
     matches at all, since the regex requires every line to carry one.
+    `netris` is {"relevant": bool, "reason": str} -- Gemini's own,
+    independent judgment of whether this PR looks CaaS-Netris/BMaaS-Netris
+    relevant, informational only (see main()'s netris_note construction;
+    this never adds a fourth suite or changes any vmaas/caas/bmaas
+    decision).
     """
     matches = list(DECISION_BLOCK_RE.finditer(text))
     if not matches:
-        return {}, {}, None
+        return {}, {}, None, None
     match = matches[-1]
     if text[match.end() :].strip():
         # Something follows the last candidate block -- the prompt asks
         # for "nothing after them", so this isn't a genuine terminal
         # answer (could be an example the model quoted mid-reasoning).
-        return {}, {}, None
+        return {}, {}, None, None
     decisions = {
         "vmaas": match.group(1).lower(),
         "caas": match.group(3).lower(),
@@ -444,7 +450,11 @@ def parse_gemini_decisions(text):
         "caas": _sanitize_reason(match.group(4)),
         "bmaas": _sanitize_reason(match.group(6)),
     }
-    confidence = int(match.group(7))
+    netris = {
+        "relevant": match.group(7).lower() == "yes",
+        "reason": _sanitize_reason(match.group(8)),
+    }
+    confidence = int(match.group(9))
     if not 0 <= confidence <= 100:
         # An out-of-range confidence means the model didn't actually follow
         # the requested format -- treat the whole block as unparseable
@@ -453,8 +463,8 @@ def parse_gemini_decisions(text):
         # `if not response_text or not gemini_decisions` check then routes
         # this through the same fail-open sentinel as any other malformed
         # response.
-        return {}, {}, None
-    return decisions, reasons, confidence
+        return {}, {}, None, None
+    return decisions, reasons, netris, confidence
 
 
 FENCE_RUN_RE = re.compile(r"`{3,}")
@@ -498,6 +508,9 @@ You will be given:
   as "clearly relevant" to each suite, and the exact file list behind each
   classification.
 - Files that check could NOT classify by path alone.
+- Files a separate, informational-only path check flagged as touching
+  Netris or Agentless-Net networking code (see the NETRIS instructions
+  below).
 - Best-effort context from graphify (a code-graph tool) about what some of
   those files actually connect to -- other functions, fixtures, or modules
   they call or are called by.
@@ -535,14 +548,30 @@ evidence (markers, names, graphify connections, or diff content) that a
 suite NOT marked "clearly relevant" is actually affected, say so -- do
 not default to "skip" just because the path-based check didn't flag it.
 
-End your response with EXACTLY these four lines, in this format, and
-nothing after them (used for automated parsing). Each suite line must
-include a short reason after "|" -- a few words, under 12 words, no
+Separately, judge whether this PR looks relevant to CaaS Netris / BMaaS
+Netris -- suite variants that provision real cloud infrastructure through
+Netris (SDN) or Agentless-Net (IPAM/L2/L3 networking automation) instead
+of the standard path, run manually via a PR label rather than
+automatically, and are NOT one of VMAAS/CAAS/BMAAS above (do not fold this
+judgment into any of those three decisions). Say "yes" if the diff touches
+Netris/Agentless-Net automation directly (even if a path check already
+flagged some of those files -- confirm it's real, not incidental), touches
+CaaS/BMaaS networking or subnet/network-backend provisioning logic in a
+way a Netris- or Agentless-Net-backed environment would specifically
+exercise, or changes tests under a Netris-only test path. Say "no",
+including when you have no real signal either way -- this is informational
+only, so an uninformative "no evidence found" is fine and expected on most
+PRs.
+
+End your response with EXACTLY these five lines, in this format, and
+nothing after them (used for automated parsing). Each suite/NETRIS line
+must include a short reason after "|" -- a few words, under 12 words, no
 newlines, explaining what specifically drove that decision (a file
 name, a marker, a graphify connection, "no evidence found"):
 VMAAS: <skip|sanity|regression> | <short reason>
 CAAS: <skip|sanity|regression> | <short reason>
 BMAAS: <skip|sanity|regression> | <short reason>
+NETRIS: <yes|no> | <short reason>
 CONFIDENCE: <0-100>
 """
 
@@ -566,6 +595,7 @@ def build_user_content(context, graphify_context):
     deterministic_files = context.get("deterministic_files", {})
     ambiguous_files = context.get("ambiguous_files", [])
     config_files = context.get("config_files", [])
+    netris_relevant_files = context.get("netris_relevant_files", [])
 
     def file_block(files):
         return _neutralize_fences("\n".join(f"- {f}" for f in files) or "(none)")
@@ -575,6 +605,7 @@ def build_user_content(context, graphify_context):
     bmaas_files_block = file_block(deterministic_files.get("bmaas", []))
     ambiguous_block = file_block(ambiguous_files)
     config_block = file_block(config_files)
+    netris_block = file_block(netris_relevant_files)
     graphify_block = _neutralize_fences(graphify_context) if graphify_context else "(unavailable for this run)"
     diff_text = _neutralize_fences(diff_text)
 
@@ -602,6 +633,13 @@ aren't clearly named for either):
         f"""The following are YAML/JSON config files not covered by a known mapping:
 ```data
 {config_block}
+```""",
+        f"""A separate, informational-only path check flagged the following files as
+touching Netris or Agentless-Net networking automation (see the NETRIS
+instructions above -- this is not one of VMAAS/CAAS/BMAAS and does not
+gate anything):
+```data
+{netris_block}
 ```""",
         f"""## graphify context (best-effort, may be empty or unreliable -- treat as a hint, not ground truth)
 ```data
@@ -683,7 +721,36 @@ def decide(context, gemini_decisions, gemini_reasons):
     return result
 
 
-def render_decision_table(decision, confidence, ai_status, cost_line=None):
+def _build_netris_note(netris_files, gemini_netris):
+    """Combine the deterministic Netris/Agentless-Net path signal with
+    Gemini's own independent judgment (if it ran) into one short,
+    informational note -- or None if neither signal says anything. Never
+    changes any vmaas/caas/bmaas decision; this is purely "you may also
+    want to run CaaS Netris / BMaaS Netris manually" advisory text,
+    consistent with the rollout plan's Phase 3 sequencing (these suites
+    aren't wired into gating, or even this POC's own decision table, at
+    all yet).
+
+    Shown whenever EITHER signal is positive, even if the other is silent
+    or unavailable -- e.g. the deterministic filter matching with Gemini
+    never having run (needs_ai was false apart from Netris files, or the
+    call failed) still surfaces the note, since the path match alone is
+    real, actionable signal on its own.
+    """
+    deterministic_hit = bool(netris_files)
+    gemini_hit = bool(gemini_netris and gemini_netris.get("relevant"))
+    if not deterministic_hit and not gemini_hit:
+        return None
+    parts = []
+    if deterministic_hit:
+        parts.append(_deterministic_reason(netris_files))
+    if gemini_hit:
+        gemini_reason = gemini_netris.get("reason") or "(no reason given)"
+        parts.append(f"Gemini: {gemini_reason}")
+    return "; ".join(parts)
+
+
+def render_decision_table(decision, confidence, ai_status, cost_line=None, netris_note=None):
     """ai_status is one of:
     - "not_needed" -- nothing in this PR was recognized as relevant to any
       suite at all (e.g. docs-only), so there was nothing for AI to
@@ -702,6 +769,13 @@ def render_decision_table(decision, confidence, ai_status, cost_line=None):
     the cost is visible directly in the posted PR comment too, matching
     ai-diagnose-failure.py's own confidence/cost footer convention rather
     than leaving cost as something only visible in Actions logs.
+
+    netris_note (see _build_netris_note) is None whenever neither the
+    deterministic path check nor Gemini flagged CaaS-Netris/BMaaS-Netris
+    relevance -- otherwise shown as a standalone advisory line, deliberately
+    NOT a fifth table row: these suites aren't wired into this POC's
+    decision table at all (Phase 3 of the rollout plan), so giving them a
+    row would misrepresent them as gated the same way VMAAS/CAAS/BMAAS are.
     """
     lines = [
         "# 🧭 E2E Suite Selection (POC, informational only)",
@@ -725,6 +799,8 @@ def render_decision_table(decision, confidence, ai_status, cost_line=None):
         )
     else:
         lines.append("_No AI validation needed -- nothing in this PR was recognized as relevant to any E2E suite. This comment is informational only; nothing is gated on it yet._")
+    if netris_note:
+        lines.append(f"\n🔌 **Netris/Agentless-Net signal**: {netris_note} -- consider running CaaS Netris / BMaaS Netris manually (not gated by this comment).")
     if cost_line:
         lines.append(f"<sub>{cost_line}</sub>")
     return "\n".join(lines) + "\n"
@@ -737,6 +813,13 @@ def main():
     deterministic = context["deterministic"]
     deterministic_files = context.get("deterministic_files", {})
     all_deterministic_files = [f for files in deterministic_files.values() for f in files]
+    # Informational only (see _build_netris_note/render_decision_table) --
+    # never one of SUITES, never gated. Folded into needs_ai below so a PR
+    # touching ONLY Netris/Agentless-Net automation (which no other filter
+    # covers -- osac-aap/** isn't osac-operator/fulfillment-service/bare-
+    # metal-fulfillment-operator) still gets a Gemini pass instead of being
+    # entirely invisible to this script.
+    netris_files = context.get("netris_relevant_files", [])
     # Widened from "only when something is ambiguous" -- Gemini now runs as
     # a validation pass whenever ANY suite-relevant file changed at all,
     # including files the deterministic layer already resolved, since a
@@ -761,10 +844,12 @@ def main():
         or bool(config_files)
         or bool(all_deterministic_files)
         or any(deterministic.values())
+        or bool(netris_files)
     )
 
     gemini_decisions = {}
     gemini_reasons = {}
+    gemini_netris = None
     confidence = None
     ai_status = "not_needed"
     if needs_ai and not PR_DIFF_AVAILABLE:
@@ -781,11 +866,11 @@ def main():
         gemini_decisions = {"_ai_attempted": "true"}
         ai_status = "unavailable"
     elif needs_ai:
-        graphify_context = build_graphify_context(ambiguous_files, all_deterministic_files)
+        graphify_context = build_graphify_context(ambiguous_files, all_deterministic_files + netris_files)
         user_content = build_user_content(context, graphify_context)
         response_text = call_gemini(user_content)
         if response_text:
-            gemini_decisions, gemini_reasons, confidence = parse_gemini_decisions(response_text)
+            gemini_decisions, gemini_reasons, gemini_netris, confidence = parse_gemini_decisions(response_text)
             if not gemini_decisions:
                 _safe_print(
                     f"WARNING: Gemini responded ({len(response_text)} chars) but no valid terminal "
@@ -826,7 +911,8 @@ def main():
         _safe_print(cost_line)
 
     decision = decide(context, gemini_decisions, gemini_reasons)
-    table = render_decision_table(decision, confidence, ai_status=ai_status, cost_line=cost_line)
+    netris_note = _build_netris_note(netris_files, gemini_netris)
+    table = render_decision_table(decision, confidence, ai_status=ai_status, cost_line=cost_line, netris_note=netris_note)
     with open(DECISION_FILE, "w") as f:
         f.write(table)
     _safe_print(table)
