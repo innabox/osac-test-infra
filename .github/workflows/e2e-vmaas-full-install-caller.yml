@@ -22,6 +22,10 @@ on:
         description: "pytest -k filter"
         required: false
         default: ""
+      test-marker:
+        description: "pytest -m marker expression (e.g. sanity, regression). When empty, excludes tests marked requires_caas or requires_bmaas."
+        required: false
+        default: ""
       installer-ref:
         description: "Branch/ref of the OSAC monorepo"
         required: false
@@ -91,6 +95,11 @@ jobs:
     with:
       test-suite: ${{ inputs.test-suite || 'vmaas' }}
       test-filter: ${{ inputs.test-filter || '' }}
+      # The references module contains CaaS and BMaaS tests too. Those
+      # services are disabled in the VMaaS profile, so exclude tests marked
+      # with either dependency unless an explicit workflow-dispatch marker is
+      # supplied. Matches osac-project/osac#805.
+      test-marker: ${{ inputs.test-marker || 'not requires_caas and not requires_bmaas' }}
       installer-ref: ${{ inputs.installer-ref || 'main' }}
       installer-repo: ${{ inputs.installer-repo || 'osac-project/osac' }}
       image-overrides: ${{ inputs.image-overrides || '{}' }}
