@@ -696,6 +696,11 @@ jobs:
           TEST_ARGS=("tests/e2e/")
           if [ -n "${TEST_SUITE}" ]; then
             TEST_ARGS=("tests/e2e/${TEST_SUITE}/")
+            if [ -n "${TEST_MARKER}" ]; then
+              case "${TEST_SUITE}" in
+                bmaas|bmaas/*) TEST_ARGS+=("tests/e2e/references/") ;;
+              esac
+            fi
           fi
 
           FILTER_ARGS=()

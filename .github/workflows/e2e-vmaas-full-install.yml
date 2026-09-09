@@ -794,9 +794,9 @@ jobs:
           if [ -n "${EFFECTIVE_TEST_SUITE}" ]; then
             TEST_ARGS="tests/e2e/${EFFECTIVE_TEST_SUITE}/"
             # Run references tests alongside vmaas suite
-            if [ "${EFFECTIVE_TEST_SUITE}" = "vmaas" ]; then
-              TEST_ARGS="${TEST_ARGS} tests/e2e/references/"
-            fi
+            case "${EFFECTIVE_TEST_SUITE}" in
+              vmaas|vmaas/*) TEST_ARGS="${TEST_ARGS} tests/e2e/references/" ;;
+            esac
           fi
 
           FILTER_ARGS=""
