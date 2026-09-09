@@ -22,8 +22,10 @@ Network=host
 Volume=%h/.monitoring-server/config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro,Z
 Volume=%h/.monitoring-server/data/alertmanager:/alertmanager:Z
 
-# Bind to localhost only; --cluster.listen-address="" disables gossip clustering
-Exec=--config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager --web.listen-address=127.0.0.1:9093 --cluster.listen-address=""
+# Bind to localhost only; --cluster.listen-address="" disables gossip clustering.
+# Set the public relay hostname so Slack's generated Alertmanager links do not
+# expose the central machine's internal hostname.
+Exec=--config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager --web.listen-address=127.0.0.1:9093 --web.external-url=http://osac-ci.redhat.com:9093 --cluster.listen-address=""
 
 [Service]
 Restart=always
