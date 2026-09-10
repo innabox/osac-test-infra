@@ -722,10 +722,14 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/test-output"
 
+          rm -f "$RUNNER_TEMP/bmaas_ssh_key" "$RUNNER_TEMP/bmaas_ssh_key.pub"
+          ssh-keygen -t ed25519 -f "$RUNNER_TEMP/bmaas_ssh_key" -N '' -q
+
           podman run --rm --network=host \
             -v "${KUBECONFIG_PATH}":/root/.kube/config:ro,Z \
             -v "${RUNNER_TEMP}/pull-secret.json":/root/pull-secret:ro,Z \
             -v "${RUNNER_TEMP}/aap-license.zip":/root/aap-license.zip:ro,Z \
+            -v "${RUNNER_TEMP}/bmaas_ssh_key.pub":/root/.ssh/id_rsa.pub:ro,Z \
             -v "${RUNNER_TEMP}/test-output":/tmp/test-output:Z \
             -e KUBECONFIG=/root/.kube/config \
             -e OSAC_NAMESPACE="${OSAC_NAMESPACE}" \
