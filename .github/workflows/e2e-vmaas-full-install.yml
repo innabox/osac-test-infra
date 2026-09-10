@@ -441,9 +441,12 @@ jobs:
             # Build OSAC CLI from source when this component is fulfillment-service.
             # Keyed off imageKey (not a repo-name substring), so this works whether
             # repo is fulfillment-service's own repo or a monorepo like osac-project/osac.
+            echo "DEBUG: Checking CLI build - image_key='${image_key}', component_dir='${component_dir}'"
             if [[ "${image_key}" == "service.images.service" ]]; then
+              echo "Building OSAC CLI from ${component_dir}/cmd/osac"
               (cd "${component_dir}" && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/osac-cli-bin" ./cmd/osac)
               echo "OSAC_CLI_BIN=$RUNNER_TEMP/osac-cli-bin" >> "$GITHUB_ENV"
+              echo "CLI build completed: $RUNNER_TEMP/osac-cli-bin"
             fi
 
             # Save CRDs from the component source so they can be applied after
