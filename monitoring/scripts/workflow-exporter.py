@@ -2735,14 +2735,23 @@ class WorkflowExporter:
         Returns: {"success": N, "failure": N, "cancelled": N,
                   "queued": N, "in_progress": N, "total": N,
                   "failure_rate": 0.xx, "success_rate": 0.xx,
+                  "infra_failure_count": N, "infra_failure_pct": 0.xx,
                   "cache_oldest_at": "2026-..." | None}
         """
         # Reuse the same filtering logic — just count instead of return
         jobs = self.get_jobs_json(params)
         counts = {}
+        infra_failure_count = 0
         for job in jobs:
             c = job.get("conclusion") or job.get("status", "unknown")
             counts[c] = counts.get(c, 0) + 1
+            # get_jobs_json already excludes failure_reason "gate" rows
+            # (see _is_gate_only_failure) -- a gate-only failure has no
+            # e2e signal at all, so it's correctly absent from both this
+            # count and the failure_count denominator below, not silently
+            # folded into "infra".
+            if job.get("failure_reason") == "infra":
+                infra_failure_count += 1
         total = len(jobs)
         success_count = counts.get("success", 0)
         failure_count = counts.get("failure", 0)
@@ -2761,6 +2770,12 @@ class WorkflowExporter:
             # two rates always sum to exactly 1 (avoids float rounding
             # drift between two separately-rounded fractions).
             "success_rate": round(1 - failure_rate, 4) if decisive > 0 else 0,
+            "infra_failure_count": infra_failure_count,
+            # Of all failures (not of all runs) -- "what fraction of the
+            # failures we did have were CI's fault rather than the
+            # product's", distinct from failure_rate itself (which is
+            # fraction of all decisive runs that failed at all).
+            "infra_failure_pct": round(infra_failure_count / failure_count, 4) if failure_count > 0 else 0,
             # How far back the exporter's in-memory data actually goes,
             # regardless of the query's own filters -- lets the dashboard
             # show "data since: X" instead of implying full coverage of
@@ -2797,7 +2812,22 @@ class WorkflowExporter:
                 for entry in (job.get("failed_step") or "").split("; "):
                     if not entry:
                         continue
-                    step = entry.split(" → ")[-1]
+                    parts = entry.split(" → ")
+                    step = parts[-1]
+                    # Rows stored before the ingestion-time gate-job filter
+                    # existed (see _extract_failed_steps) still carry the
+                    # gate job's own relay step ("e2e-*-gate → Run echo
+                    # ...") alongside the real failing job's entry in the
+                    # same failed_step text -- confirmed live, e.g. run
+                    # #32186127810's stored text has both "e2e-caas-full-install
+                    # / e2e → Build and load component images" AND
+                    # "e2e-caas-gate → Run echo ...". failure_reason for
+                    # that row is correctly "infra" either way (the real
+                    # entry alone decides it), but this per-step breakdown
+                    # would otherwise also count the noise entry as if it
+                    # were its own distinct infra cause.
+                    if len(parts) > 1 and self._is_gate_job(parts[0]):
+                        continue
                     if step not in self.TEST_STEPS:
                         infra_by_step[step] = infra_by_step.get(step, 0) + 1
             elif reason == "test":

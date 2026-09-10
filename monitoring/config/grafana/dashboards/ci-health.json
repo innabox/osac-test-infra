@@ -19,7 +19,7 @@
       "title": "Pass Rate Trend",
       "description": "Overall success rate over time (increase() of completed runs per interval). Native Prometheus query, not filtered by category/workflow -- only by repo.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 1 },
+      "gridPos": { "h": 12, "w": 16, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
@@ -88,10 +88,51 @@
       ]
     },
     {
+      "title": "Infra Failure Rate",
+      "description": "Of all failures in the selected window, the fraction attributed to CI/infra rather than the product (failure_reason: infra vs test). Gate-only failures (failure_reason: gate -- a precondition like e2e-readiness failed and the real e2e job never ran) are excluded entirely from both this and the failure count it's a fraction of, not folded into infra.",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 5 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/infra_failure_pct/", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "infra_failure_pct", "text": "infra_failure_pct", "type": "number" }
+          ]
+        }
+      ]
+    },
+    {
       "title": "Overall MTTR",
       "description": "Mean time from a failing run to the next run of the same workflow that succeeds, averaged across all workflows.",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 5 },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 9 },
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
       "fieldConfig": {
         "defaults": {
@@ -128,7 +169,7 @@
       "title": "Flake Rate by Workflow",
       "description": "Fraction of successful runs that needed more than one attempt (run_attempt > 1) to go green -- a retry-to-green with no code change. Runs that never succeeded are real failures, not flakes, and aren't counted here.",
       "type": "bargauge",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
       "fieldConfig": {
         "defaults": {
@@ -188,7 +229,7 @@
       "title": "MTTR by Workflow",
       "description": "Per-workflow mean time to recovery. Click column headers to sort.",
       "type": "table",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
       "fieldConfig": {
         "defaults": {},
@@ -246,7 +287,7 @@
       "title": "Time to Merge (First Approval, Median)",
       "description": "Median time from a PR's first human-reviewer approval to merge, for PRs merged within the selected time range (filtered by merge time, not open time). Median, not mean -- a handful of PRs approved and then simply never merged for days/weeks skew the mean heavily (see the Outliers table); median reports the typical case. Excludes PRs with no human approval on record (e.g. admin-merged, or only bot-reviewed -- see approved_count/count for that ratio). Not affected by the Category/Workflow/Job Type filters, which don't apply to PRs -- only Repository does.",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 17 },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 21 },
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
       "fieldConfig": {
         "defaults": {
@@ -283,7 +324,7 @@
       "title": "Time to Merge by Repo",
       "description": "Per-repo PR timing/retest stats, for PRs merged within the selected time range. Approval→Merge excludes PRs with no human approval on record; Open→Merge is the full PR lifecycle (create to merge). Both report median (typical case) and mean (sensitive to outliers -- a big mean/median gap means outliers exist, see the Outliers table below). Retests (avg) counts e2e runs beyond the first per PR (each /retest or new push triggers another). Click column headers to sort.",
       "type": "table",
-      "gridPos": { "h": 4, "w": 16, "x": 8, "y": 17 },
+      "gridPos": { "h": 4, "w": 16, "x": 8, "y": 21 },
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
       "fieldConfig": {
         "defaults": {},
@@ -371,7 +412,7 @@
       "title": "Time to Merge Outliers",
       "description": "PRs approved and then not merged for a long time (>3x the window's median approval→merge time, or >1h absolute floor). These are exactly what the median above is deliberately insensitive to -- surfaced here so a real \"approved, then forgotten\" PR doesn't just disappear from the reported numbers. Capped at the 5 worst per query.",
       "type": "table",
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 21 },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 25 },
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
       "fieldConfig": {
         "defaults": {
