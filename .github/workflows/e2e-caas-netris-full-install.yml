@@ -288,7 +288,7 @@ jobs:
     # runners aren't bound by GitHub-hosted runners' 6h job cap, so this is
     # just an explicit upper bound, not a platform limit.
     runs-on: ${{ needs.provision.outputs.runner-label }}
-    timeout-minutes: 360
+    timeout-minutes: 330
     permissions:
       contents: read
     outputs:
@@ -404,6 +404,7 @@ jobs:
       # is the equivalent single-command form if that granularity is ever
       # not wanted.
       - name: Install prerequisites and cache images
+        timeout-minutes: 30
         shell: bash
         timeout-minutes: 30
         env:
@@ -423,6 +424,7 @@ jobs:
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Deploy Netris lab
+        timeout-minutes: 45
         shell: bash
         timeout-minutes: 45
         env:
@@ -431,7 +433,7 @@ jobs:
 
       - name: Deploy OCP from snapshot
         shell: bash
-        timeout-minutes: 60
+        timeout-minutes: 15
         env:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make deploy-ocp INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"
@@ -538,6 +540,7 @@ jobs:
           make deploy-osac INFRA=netris SUITE=caas EXTRA_VARS="${MERGED}"
 
       - name: Setup CaaS hosts and catalog
+        timeout-minutes: 20
         shell: bash
         timeout-minutes: 30
         env:
