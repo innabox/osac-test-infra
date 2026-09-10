@@ -47,7 +47,16 @@ if [ -f "${INFRA_DIR}/.mgmt-network" ]; then
     oc get pods -n "${OSAC_NAMESPACE:-osac-e2e-ci}" > "$LOG_DIR/osac-pods.txt" 2>&1 || true
     oc get agents -n hardware-inventory -o wide > "$LOG_DIR/agents.txt" 2>&1 || true
     oc get clusterorders -n "${OSAC_NAMESPACE:-osac-e2e-ci}" > "$LOG_DIR/clusterorders.txt" 2>&1 || true
-    oc get hostedclusters -A > "$LOG_DIR/hostedclusters.txt" 2>&1 || true
+
+    # Full YAML of the hardware-inventory CRs whose .status carries the agent
+    # discovery state. They reference the pull secret by NAME (not exposed
+    # here); strip the assisted-installer signed URLs (Agent debugInfo
+    # eventsURL/logsURL, InfraEnv ISO) whose tokens would otherwise land in
+    # this raw-uploaded dir. (Hosted-cluster CRs live in gather-e2e.sh.)
+    oc get agents -A -o yaml 2>/dev/null \
+        | yq 'del(.items[].status.debugInfo)' > "$LOG_DIR/agents.yaml" 2>/dev/null || true
+    oc get infraenvs -A -o yaml 2>/dev/null \
+        | yq 'del(.items[].status.bootArtifacts) | del(.items[].status.isoDownloadURL)' > "$LOG_DIR/infraenvs.yaml" 2>/dev/null || true
 fi
 
 info "Diagnostics saved to $LOG_DIR"

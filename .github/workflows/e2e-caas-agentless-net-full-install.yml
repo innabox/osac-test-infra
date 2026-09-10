@@ -48,10 +48,18 @@ on:
         required: false
         type: string
         default: ""
+  schedule:
+    # Every 3 hours, matching the netris full-install cadence.
+    - cron: "0 */3 * * *"
+  pull_request:
+    branches: [main]
 
 concurrency:
   group: e2e-caas-agentless-net
-  cancel-in-progress: false
+  # Cancel a superseded pull_request run (a new push shouldn't leave the old
+  # ~6h run burning the shared orchestrator), but never cancel scheduled or
+  # manual runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   provision:
@@ -228,6 +236,35 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         run: make -C infra/agentless-net gather-e2e
+
+      # The make gather-* steps above populate infra/agentless-net/logs with
+      # the agentless-net-specific state (containerlab fabric, leaf switches,
+      # net-node routing/NAT, host VMs, agents, hosted-cluster health) that the
+      # osac control-plane bundle below does NOT capture. It's collected every
+      # run but was never uploaded; upload it raw (it holds only `get`/`-o wide`
+      # lists, no secret-bearing yaml -- keep it that way).
+      - name: Upload infra diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentless-net-infra-logs-${{ github.run_id }}
+          path: infra/agentless-net/logs/
+          if-no-files-found: ignore
+
+      # Redacted (gitleaks) upload of the OSAC control-plane diagnostics --
+      # osac-operator + AAP job pod logs, events, describes -- which carry the
+      # provisioning failure reason. The make gather-* steps above only write
+      # to infra/agentless-net/logs (containerlab/switch/net-node/VM state),
+      # which nothing uploads; this makes the control-plane logs retrievable.
+      - name: Gather and upload OSAC diagnostics
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/gather-artifacts
+        with:
+          namespace: osac-e2e-ci
+          kubeconfig-path: /root/.kube/agentless-lab-mgmt.kubeconfig
+          artifact-name: osac-logs-agentless-net-full-install-${{ github.run_id }}
 
   teardown:
     needs: [provision, push-secrets, e2e]

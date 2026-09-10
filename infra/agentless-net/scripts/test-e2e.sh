@@ -41,6 +41,20 @@ for c in json.load(sys.stdin):
 "
 }
 
+# Print agent + clusterorder progression so the long PROGRESSING waits are
+# actionable. Selects only benign agent debugInfo fields (state/stateInfo),
+# never the token-bearing eventsURL/logsURL.
+print_progress() {
+    echo "    agents:"
+    KUBECONFIG="$KUBECONFIG" oc get agents -A --no-headers \
+        -o 'custom-columns=HOST:.metadata.annotations.osac\.openshift\.io/host_uuid,APPROVED:.spec.approved,ROLE:.status.role,STATE:.status.debugInfo.state,INFO:.status.debugInfo.stateInfo' \
+        2>/dev/null | sed 's/^/      /' || true
+    echo "    clusterorders:"
+    KUBECONFIG="$KUBECONFIG" oc get clusterorder -n "$OSAC_NAMESPACE" --no-headers \
+        -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase' \
+        2>/dev/null | sed 's/^/      /' || true
+}
+
 # ---------- preflight ----------
 
 info "Running preflight checks..."
@@ -58,6 +72,18 @@ fi
 
 info "OSAC running, ${AGENT_COUNT} agents available"
 
+# ---------- osac login ----------
+#
+# The osac CLI needs a persisted login (~/.config/osac) before the get/create
+# calls below. Mirror tests/conftest.py's private_cli: internal API address,
+# admin SA token, --private/--insecure. setup-caas.sh talks to the same
+# internal API via curl; here we use the CLI.
+
+info "Logging in to OSAC..."
+INTERNAL_API="https://$(oc get route fulfillment-internal-api -n "$OSAC_NAMESPACE" -o jsonpath='{.status.ingress[0].host}')"
+osac login --address "$INTERNAL_API" --insecure --private \
+    --token-script "oc create token -n $OSAC_NAMESPACE admin"
+
 # ---------- create clusters ----------
 
 info "Creating clusters..."
@@ -67,10 +93,14 @@ for name in "${CLUSTER_NAMES[@]}"; do
         echo "  $name already exists — skipping creation"
         CLUSTER_ID=$(cluster_id_by_name "$name")
     else
-        CREATE_OUT=$(osac create cluster \
-            --template "$CLUSTER_TEMPLATE" \
-            -f pull_secret="$PULL_SECRET" \
-            --name "$name" 2>&1)
+        if ! CREATE_OUT=$(osac create cluster \
+                --template "$CLUSTER_TEMPLATE" \
+                -f pull_secret="$PULL_SECRET" \
+                --name "$name" 2>&1); then
+            echo "ERROR: osac create cluster failed for $name:"
+            echo "$CREATE_OUT"
+            exit 1
+        fi
         CLUSTER_ID=$(echo "$CREATE_OUT" | grep -oP '[0-9a-f-]{36}' | head -1)
         echo "  Created $name (ID: $CLUSTER_ID)"
     fi
@@ -122,7 +152,9 @@ for i in "${!CLUSTER_NAMES[@]}"; do
 
         if [ "$state" = "CLUSTER_STATE_FAILED" ]; then
             echo "ERROR: $name FAILED"
-            osac get cluster "$id" -o yaml
+            # Drop template_parameters -- it embeds the pull secret, which
+            # would otherwise leak into the CI log.
+            osac get cluster "$id" -o yaml | yq 'del(.spec.template_parameters)'
             exit 1
         fi
 
@@ -144,6 +176,7 @@ for i in "${!CLUSTER_NAMES[@]}"; do
 
         sleep 60; elapsed=$((elapsed + 60))
         echo "  ${elapsed}s — $name state: $state"
+        print_progress
 
         if [ "$elapsed" -ge 3600 ]; then
             echo "ERROR: $name not ready after ${elapsed}s (state: $state)"
