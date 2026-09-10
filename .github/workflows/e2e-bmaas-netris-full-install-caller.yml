@@ -77,6 +77,10 @@ on:
         description: "Branch, tag, or commit of the osac mono-repo to clone -- empty means main"
         required: false
         default: ""
+      test-ref:
+        description: "Git ref (branch/tag/SHA) of the osac mono-repo tests to run -- empty means main"
+        required: false
+        default: "main"
 
 concurrency:
   # PR dispatches for a new commit must cancel an older run for the same PR.
@@ -100,6 +104,12 @@ jobs:
       bmf-operator-image: ${{ inputs.bmf-operator-image || '' }}
       osac-repo: ${{ inputs.osac-repo || '' }}
       osac-branch: ${{ inputs.osac-branch || '' }}
+      # test-ref is the 16th workflow_dispatch input -- GitHub caps
+      # dispatch at 25 (raised from 10 in Dec 2025).  test-repository
+      # stays pinned because the reusable workflow's trusted-repo
+      # allowlist rejects any other value.
+      test-ref: ${{ inputs.test-ref || 'main' }}
+      test-repository: "osac-project/osac"
       test-infra-repository: ${{ inputs.pr-repository || github.event.pull_request.head.repo.full_name || github.repository }}
       test-infra-ref: ${{ inputs.pr-ref || github.event.pull_request.head.ref || github.ref }}
       test-infra-sha: ${{ inputs.pr-sha || github.event.pull_request.head.sha || '' }}

@@ -57,6 +57,16 @@ on:
         required: false
         type: string
         default: ""
+      test-ref:
+        description: "Git ref of the osac mono-repo to checkout for e2e tests"
+        required: false
+        type: string
+        default: "main"
+      test-repository:
+        description: "GitHub repo (owner/name) to checkout for e2e tests"
+        required: false
+        type: string
+        default: "osac-project/osac"
       components:
         description: >-
           JSON array of components to build from source on the EC2 box and
@@ -318,6 +328,55 @@ jobs:
           ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || github.ref }}
           persist-credentials: false
 
+      - name: Validate test source inputs
+        shell: bash
+        env:
+          TEST_REF: ${{ inputs.test-ref }}
+          TEST_REPOSITORY: ${{ inputs.test-repository }}
+        run: |
+          set -euo pipefail
+          # Only allow tests from the trusted upstream repo.  Mutable refs
+          # (branches, tags) are accepted because pinning to an immutable
+          # SHA would break the intended main / feature-branch usage, but
+          # the repo itself must be the canonical osac-project/osac so
+          # arbitrary third-party test code never runs alongside secrets.
+          TRUSTED_REPOS=("osac-project/osac")
+          trusted=false
+          for repo in "${TRUSTED_REPOS[@]}"; do
+            if [[ "${TEST_REPOSITORY}" == "${repo}" ]]; then
+              trusted=true
+              break
+            fi
+          done
+          if [[ "${trusted}" != "true" ]]; then
+            echo "::error::test-repository '${TEST_REPOSITORY}' is not in the trusted allowlist (${TRUSTED_REPOS[*]})"
+            exit 1
+          fi
+          # Reject option-shaped refs and validate safe characters
+          if [[ "${TEST_REF}" == -* ]]; then
+            echo "::error::test-ref must not start with '-': ${TEST_REF}"
+            exit 1
+          fi
+          if [[ ! "${TEST_REF}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::test-ref contains invalid characters: ${TEST_REF}"
+            exit 1
+          fi
+
+      - name: Overlay tests from osac mono-repo
+        env:
+          TEST_REF: ${{ inputs.test-ref }}
+          TEST_REPOSITORY: ${{ inputs.test-repository }}
+        run: |
+          set -euo pipefail
+          OSAC_CLONE_DIR="${GITHUB_WORKSPACE}/osac-mono"
+          git init "$OSAC_CLONE_DIR"
+          git -C "$OSAC_CLONE_DIR" sparse-checkout init --cone
+          git -C "$OSAC_CLONE_DIR" sparse-checkout set tests pyproject.toml
+          git -C "$OSAC_CLONE_DIR" fetch --depth 1 -- \
+            "https://github.com/${TEST_REPOSITORY}.git" "${TEST_REF}"
+          git -C "$OSAC_CLONE_DIR" checkout FETCH_HEAD
+          echo "OSAC_MONO_DIR=${OSAC_CLONE_DIR}" >> "$GITHUB_ENV"
+
       - name: Validate component image override inputs
         shell: bash
         env:
@@ -518,7 +577,17 @@ jobs:
         id: test
         timeout-minutes: 60
         shell: bash
-        run: make run-tests INFRA=netris SUITE=bmaas_networking
+        run: |
+          set -euo pipefail
+          if [[ ! -f infra/netris/.env.infra ]]; then
+            echo "ERROR: infra/netris/.env.infra not found -- run deploy-osac first"
+            exit 1
+          fi
+          set -a && . infra/netris/.env.infra && set +a
+          mkdir -p reports
+          pytest "${OSAC_MONO_DIR}/tests/e2e/bmaas/regression/networking/" \
+            -n 0 -v --tb=short \
+            --junitxml=reports/bmaas-networking.xml
 
       - name: Gather infra diagnostics
         if: always()
