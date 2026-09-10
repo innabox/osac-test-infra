@@ -19,6 +19,16 @@ on:
         required: false
         type: string
         default: ""
+      enablement-tests:
+        description: "Run the service enablement before/after upgrade checks"
+        required: false
+        type: boolean
+        default: false
+      enable-caas:
+        description: "Enable CaaS in the initial installation"
+        required: false
+        type: boolean
+        default: false
       namespace:
         description: "OSAC namespace on the cluster"
         required: false
@@ -498,6 +508,7 @@ jobs:
           INSTALLER_NAMESPACE: ${{ inputs.namespace }}
           INSTALLER_REF: ${{ inputs.installer-ref }}
           INSTALLER_REPO: ${{ inputs.installer-repo }}
+          ENABLE_CAAS: ${{ inputs.enable-caas }}
         run: |
           set -o pipefail
           # Ensure helm and yq are available
@@ -573,7 +584,14 @@ jobs:
           fi
           echo "CatalogSource is READY."
 
-          make install-infra PLATFORM=openshift PROFILE=vmaas-ci NS="${INSTALLER_NAMESPACE}"
+          # CaaS requires MCE/HyperShift CRDs. Keep the vmaas-ci OSAC values
+          # below, because they provide the VMaaS k8s-only networking setup.
+          INFRA_PROFILE=vmaas-ci
+          if [[ "${ENABLE_CAAS}" == "true" ]]; then
+            INFRA_PROFILE=full-ci
+          fi
+          echo "Installing infrastructure with profile ${INFRA_PROFILE}"
+          make install-infra PLATFORM=openshift PROFILE="${INFRA_PROFILE}" NS="${INSTALLER_NAMESPACE}"
 
       - name: Install OSAC
         env:
@@ -583,6 +601,7 @@ jobs:
           INSTALLER_CLUSTER_TEMPLATE: ${{ inputs.cluster-template }}
           AAP_LICENSE_FILE: ${{ runner.temp }}/aap-license.zip
           IMAGE_OVERRIDES: ${{ inputs.image-overrides }}
+          ENABLE_CAAS: ${{ inputs.enable-caas }}
         run: |
           # Reuse the osac-installer dir resolved by the previous step (via $GITHUB_ENV)
           cd "${INSTALLER_DIR}"
@@ -667,6 +686,10 @@ jobs:
             # actual chart pull.
             yq -i '(.dependencies[] | select(.repository | test("^file://"))).version = "0.0.0"' charts/osac/Chart.yaml
             helm dependency update charts/osac/
+          fi
+
+          if [[ "${ENABLE_CAAS}" == "true" ]]; then
+            SET_ARGS+=("--set" "global.services.caas.enabled=true")
           fi
 
           # Deploy OSAC via Helm (includes publish-templates and create-hub hooks)
@@ -787,23 +810,24 @@ jobs:
           OSAC_CLUSTER_TEMPLATE: ${{ inputs.cluster-template }}
           E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
           METERING_ADAPTER_URL: ${{ steps.metering-adapter.outputs.url }}
+          ENABLEMENT_TESTS: ${{ inputs.enablement-tests }}
         run: |
           KUBECONFIG_PATH="$RUNNER_TEMP/kubeconfig"
 
-          TEST_ARGS="tests/e2e/"
+          TEST_ARGS=("tests/e2e/")
           if [ -n "${EFFECTIVE_TEST_SUITE}" ]; then
-            TEST_ARGS="tests/e2e/${EFFECTIVE_TEST_SUITE}/"
+            TEST_ARGS=("tests/e2e/${EFFECTIVE_TEST_SUITE}/")
             # Run references tests alongside vmaas suite
             if [ -n "${TEST_MARKER}" ]; then
               case "${EFFECTIVE_TEST_SUITE}" in
-                vmaas|vmaas/*) TEST_ARGS="${TEST_ARGS} tests/e2e/references/" ;;
+                vmaas|vmaas/*) TEST_ARGS+=("tests/e2e/references/") ;;
               esac
             fi
           fi
 
-          FILTER_ARGS=""
+          FILTER_ARGS=()
           if [ -n "${TEST_FILTER}" ]; then
-            FILTER_ARGS="-k ${TEST_FILTER}"
+            FILTER_ARGS=(-k "${TEST_FILTER}")
           fi
 
           # Array, not a plain string: TEST_MARKER can be a compound pytest
@@ -819,21 +843,54 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/test-output"
 
-          podman run --rm --network=host \
-            -v "${KUBECONFIG_PATH}":/root/.kube/config:ro,Z \
-            -v "${RUNNER_TEMP}/pull-secret.json":/root/pull-secret:ro,Z \
-            -v "${RUNNER_TEMP}/aap-license.zip":/root/aap-license.zip:ro,Z \
-            -v "${RUNNER_TEMP}/test-output":/tmp/test-output:Z \
-            -e KUBECONFIG=/root/.kube/config \
-            -e OSAC_VM_KUBECONFIG=/root/.kube/config \
-            -e OSAC_NAMESPACE="${OSAC_NAMESPACE}" \
-            -e OSAC_VM_TEMPLATE="${OSAC_VM_TEMPLATE}" \
-            -e OSAC_CLUSTER_TEMPLATE="${OSAC_CLUSTER_TEMPLATE}" \
-            -e OSAC_PULL_SECRET_PATH=/root/pull-secret \
-            -e METERING_ADAPTER_URL="${METERING_ADAPTER_URL}" \
-            "${E2E_IMAGE}" \
-            pytest ${TEST_ARGS} ${FILTER_ARGS} "${MARKER_ARGS[@]}" \
-              --junitxml=/tmp/test-output/junit.xml -v
+          run_suite() {
+            local junit_path="$1"
+            shift
+            podman run --rm --network=host \
+              -v "${KUBECONFIG_PATH}":/root/.kube/config:ro,Z \
+              -v "${RUNNER_TEMP}/pull-secret.json":/root/pull-secret:ro,Z \
+              -v "${RUNNER_TEMP}/aap-license.zip":/root/aap-license.zip:ro,Z \
+              -v "${RUNNER_TEMP}/test-output":/tmp/test-output:Z \
+              -e KUBECONFIG=/root/.kube/config \
+              -e OSAC_VM_KUBECONFIG=/root/.kube/config \
+              -e OSAC_NAMESPACE="${OSAC_NAMESPACE}" \
+              -e OSAC_VM_TEMPLATE="${OSAC_VM_TEMPLATE}" \
+              -e OSAC_CLUSTER_TEMPLATE="${OSAC_CLUSTER_TEMPLATE}" \
+              -e OSAC_PULL_SECRET_PATH=/root/pull-secret \
+              -e METERING_ADAPTER_URL="${METERING_ADAPTER_URL}" \
+              "${E2E_IMAGE}" \
+              pytest "$@" --junitxml="${junit_path}" -v
+          }
+
+          test_rc=0
+          if ! run_suite /tmp/test-output/junit.xml \
+            "${TEST_ARGS[@]}" "${FILTER_ARGS[@]}" "${MARKER_ARGS[@]}"; then
+            test_rc=1
+          fi
+
+          if [[ "${ENABLEMENT_TESTS}" == "true" ]]; then
+            if ! run_suite /tmp/test-output/junit-enablement-disabled.xml \
+              tests/e2e/enablement/test_disabled_services.py; then
+              test_rc=1
+            fi
+
+            helm_bin="$(command -v helm || true)"
+            if [[ -z "${helm_bin}" || ! -x "${helm_bin}" ]]; then
+              echo "::error::Helm is required for the enablement upgrade but was not found on the runner"
+              test_rc=1
+            elif ! KUBECONFIG="${KUBECONFIG_PATH}" "${helm_bin}" upgrade osac "${INSTALLER_DIR}/charts/osac" \
+              --namespace "${OSAC_NAMESPACE}" --reuse-values \
+              --set global.services.bmaas.enabled=true --wait --timeout 10m; then
+              echo "::error::Helm upgrade enabling BMaaS failed"
+              test_rc=1
+            else
+              if ! run_suite /tmp/test-output/junit-enablement-enabled.xml \
+                tests/e2e/enablement/test_service_upgrade.py; then
+                test_rc=1
+              fi
+            fi
+          fi
+          exit "${test_rc}"
 
       - name: Gather artifacts
         if: always()
