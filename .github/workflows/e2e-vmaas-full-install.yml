@@ -15,10 +15,10 @@ on:
         type: string
         default: ""
       test-marker:
-        description: "pytest -m marker expression (e.g. sanity, regression). Empty runs all."
+        description: "pytest -m marker expression (e.g. sanity, regression). Defaults to VMaaS-compatible tests."
         required: false
         type: string
-        default: ""
+        default: "not requires_caas and not requires_bmaas"
       namespace:
         description: "OSAC namespace on the cluster"
         required: false
