@@ -370,6 +370,7 @@ jobs:
           for i in $(seq 0 $((COUNT - 1))); do
             repo=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].repo")
             ref=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].ref")
+            aap_project_ref=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].aapProjectRef // empty")
             file=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].containerfile // \"Containerfile\"")
             image_key=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].imageKey")
             build_type=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].buildType // \"containerfile\"")
@@ -443,8 +444,8 @@ jobs:
 
             RESULTS=$(echo "${RESULTS}" | jq -c \
               --arg image "${tag}" --arg key "${image_key}" \
-              --arg repo "${repo}" --arg ref "${ref}" --arg sha "${sha}" --arg file "${file}" --arg crds "${crds_dir}" \
-              '. + [{"image":$image,"imageKey":$key,"repo":$repo,"ref":$ref,"sha":$sha,"containerfile":$file,"crdsDir":$crds}]')
+              --arg repo "${repo}" --arg ref "${ref}" --arg aap_project_ref "${aap_project_ref}" --arg sha "${sha}" --arg file "${file}" --arg crds "${crds_dir}" \
+              '. + [{"image":$image,"imageKey":$key,"repo":$repo,"ref":$ref,"aapProjectRef":$aap_project_ref,"sha":$sha,"containerfile":$file,"crdsDir":$crds}]')
 
             # Recorded after every component, not just once at the end -- if
             # a later component fails the loop, images already built and
@@ -556,6 +557,8 @@ jobs:
             image=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].image")
             image_key=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].imageKey")
             repo=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].repo")
+            ref=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].ref")
+            aap_project_ref=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].aapProjectRef // empty")
             sha=$(echo "${COMPONENT_BUILD_RESULTS}" | jq -r ".[$i].sha")
 
             if [[ "${image_key}" == *.repository ]]; then
@@ -575,15 +578,20 @@ jobs:
               echo "Component[$i] image override: ${image_key}=${image}"
             fi
 
-            # Use resolved SHA instead of branch name — merge-queue branches
-            # are ephemeral and get deleted before AAP can check them out.
+            # AAP project sync needs a fetchable SCM ref; keep using the
+            # resolved SHA for image builds, but prefer the caller-supplied
+            # project ref here so merge-group preview SHAs are not handed to
+            # AAP as branch names.
             if [[ "${image_key}" == "aap.bootstrap.image" ]]; then
+              if [[ -z "${aap_project_ref}" ]]; then
+                aap_project_ref="${ref}"
+              fi
               aap_git_uri="https://github.com/${repo}"
               MERGED_OVERRIDES=$(echo "${MERGED_OVERRIDES}" | \
-                jq -c --arg bk "aap.configAsCode.projectGitBranch" --arg bv "${sha}" \
+                jq -c --arg bk "aap.configAsCode.projectGitBranch" --arg bv "${aap_project_ref}" \
                       --arg uk "aap.configAsCode.projectGitUri" --arg uv "${aap_git_uri}" \
                       '. + {($bk): $bv, ($uk): $uv}')
-              echo "Component[$i] AAP project override: sha=${sha} uri=${aap_git_uri}"
+              echo "Component[$i] AAP project override: branch=${aap_project_ref} uri=${aap_git_uri}"
             fi
 
             # ansible.controller.execution_environment's own `pull` field
