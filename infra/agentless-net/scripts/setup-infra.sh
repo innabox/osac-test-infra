@@ -48,19 +48,39 @@ if ! command -v ansible-playbook &>/dev/null; then
     dnf install -y ansible-core
 fi
 
-# ---------- cluster-tool ----------
+# ---------- OpenShift CLI (oc) ----------
 
-if ! command -v cluster-tool &>/dev/null; then
-    info "Installing cluster-tool..."
-    curl -sL https://github.com/openshift-assisted/cluster-tool/releases/latest/download/cluster-tool-linux-amd64 \
-        -o /usr/local/bin/cluster-tool
-    chmod +x /usr/local/bin/cluster-tool
+if ! command -v oc &>/dev/null; then
+    info "Installing OpenShift CLI..."
+    TMP_OC=$(mktemp -d)
+    curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
+        | tar xz -C "${TMP_OC}"
+    install -m 0755 "${TMP_OC}/oc" /usr/local/bin/oc
+    install -m 0755 "${TMP_OC}/kubectl" /usr/local/bin/kubectl 2>/dev/null || true
+    rm -rf "${TMP_OC}"
+else
+    info "oc already installed"
 fi
 
-if ! cluster-tool servers 2>/dev/null | grep -q "local"; then
+# ---------- cluster-tool ----------
+
+CLUSTER_TOOL_DIR="/opt/cluster-tool"
+CLUSTER_TOOL_BIN="/usr/local/bin/cluster-tool"
+
+if [[ ! -x "${CLUSTER_TOOL_BIN}" ]]; then
+    info "Installing cluster-tool..."
+    if [[ -d "${CLUSTER_TOOL_DIR}" ]]; then
+        git -C "${CLUSTER_TOOL_DIR}" pull --ff-only
+    else
+        git clone https://github.com/osac-project/cluster-tool.git "${CLUSTER_TOOL_DIR}"
+    fi
+    install -m 0755 "${CLUSTER_TOOL_DIR}/cluster-tool" "${CLUSTER_TOOL_BIN}"
+fi
+
+if ! "${CLUSTER_TOOL_BIN}" servers 2>/dev/null | grep -q "local"; then
     info "Setting up cluster-tool local server..."
-    cluster-tool connect local --host local --data-path /var/lib/cluster-tool
-    sudo cluster-tool setup client
+    "${CLUSTER_TOOL_BIN}" connect local --host local --data-path /var/lib/cluster-tool
+    sudo "${CLUSTER_TOOL_BIN}" setup client
 else
     info "cluster-tool already configured"
 fi
