@@ -200,6 +200,8 @@ jobs:
         id: components
         env:
           COMPONENTS_JSON: ${{ inputs.components }}
+          TEST_REF: ${{ inputs.test-ref }}
+          TEST_REPOSITORY: ${{ inputs.test-repository }}
         run: |
           echo "::group::Resolve and validate components input"
 
@@ -207,6 +209,13 @@ jobs:
             echo "::error::components must be a JSON array"
             exit 1
           fi
+          if [[ "${TEST_REF}" =~ ^[0-9a-f]{40}$ ]] && \
+             echo "${COMPONENTS_JSON}" | jq -e --arg repo "${TEST_REPOSITORY}" \
+               'all(.[]; .repo == $repo)' >/dev/null; then
+            COMPONENTS_JSON=$(echo "${COMPONENTS_JSON}" | jq -c --arg sha "${TEST_REF}" 'map(.ref = $sha)')
+            echo "Resolved all test-repository component refs to immutable SHA ${TEST_REF}."
+          fi
+
           COUNT=$(echo "${COMPONENTS_JSON}" | jq 'length')
           for i in $(seq 0 $((COUNT - 1))); do
             repo=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].repo // empty")
@@ -214,6 +223,10 @@ jobs:
             image_key=$(echo "${COMPONENTS_JSON}" | jq -r ".[$i].imageKey // empty")
             if [[ -z "${repo}" || -z "${ref}" || -z "${image_key}" ]]; then
               echo "::error::components[$i] requires repo, ref, and imageKey"
+              exit 1
+            fi
+            if [[ "${ref}" == gh-readonly-queue/* ]]; then
+              echo "::error::components[$i] still uses an ephemeral merge-queue ref; pass an immutable commit SHA"
               exit 1
             fi
             if [[ ! "${repo}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
