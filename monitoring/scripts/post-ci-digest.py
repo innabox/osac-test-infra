@@ -639,6 +639,15 @@ def main():
     png_bytes = build_digest_image(data)
     html_bytes = build_digest_html(data)
 
+    # Same payload embedded in the HTML report (see build_digest_html),
+    # written out separately so CI can publish it as a workflow artifact --
+    # a stable, structured export for consumers (e.g. org-pulse) that don't
+    # want to scrape the JSON back out of the HTML.
+    json_path = "ci-digest-data.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, default=str, indent=2)
+    print(f"Saved digest data: {json_path}", file=sys.stderr)
+
     if DRY_RUN:
         png_path = "ci-digest-preview.png"
         html_path = "ci-digest-preview.html"
