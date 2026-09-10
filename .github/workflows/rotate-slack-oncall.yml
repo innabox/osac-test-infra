@@ -1,0 +1,75 @@
+---
+name: Rotate Slack on-call
+
+# Rotates a single person through a Slack usergroup on a weekly cadence and
+# posts an announcement. The rotation index is derived from the ISO week
+# number (see scripts/rotate-slack-oncall.sh) rather than stored state, so
+# a skipped or manually re-run week self-corrects instead of drifting.
+#
+# The duty window is Wednesday through the following Tuesday. The script
+# anchors to the most recently started Wednesday regardless of which day
+# it actually runs on, so a manual workflow_dispatch on a non-Wednesday
+# still reports the correct window and picks the same person.
+#
+# Target time is 6am Europe (CET/CEST, Europe/Berlin). GitHub Actions cron
+# is UTC-only and Central Europe alternates between CET (UTC+1) and CEST
+# (UTC+2) with DST, so a single UTC cron would drift an hour twice a year.
+# Both offsets are scheduled below; the "Check Europe-local run time" step
+# is the actual gate. It matches github.event.schedule (the literal cron
+# string that triggered this run) against whichever entry corresponds to
+# the *current* UTC offset, rather than comparing wall-clock hour alone --
+# a wall-clock check would misfire if the inactive season's cron run gets
+# delayed (GitHub Actions schedules aren't guaranteed to run on time) far
+# enough to cross into the active season's target hour, causing a
+# duplicate rotation/post alongside the on-time correct run.
+on:
+  schedule:
+    - cron: "0 4 * * 3" # 6am CEST (UTC+2, roughly late Mar-late Oct)
+    - cron: "0 5 * * 3" # 6am CET (UTC+1, roughly late Oct-late Mar)
+  workflow_dispatch: {}
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check Europe-local run time
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          offset=$(TZ=Europe/Berlin date +%z)
+          case "$offset" in
+            +0200) expected_cron="0 4 * * 3" ;;
+            +0100) expected_cron="0 5 * * 3" ;;
+            *)
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Unexpected Europe/Berlin UTC offset ${offset}, skipping out of caution."
+              exit 0
+              ;;
+          esac
+          if [ "${{ github.event.schedule }}" = "$expected_cron" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Schedule '${{ github.event.schedule }}' isn't the active entry for the current Europe/Berlin offset (${offset} expects '${expected_cron}') -- the other cron entry handles this time of year, skipping."
+          fi
+
+      - name: Checkout repository
+        if: steps.check.outputs.should_run == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Rotate Slack on-call usergroup
+        if: steps.check.outputs.should_run == 'true'
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_ONCALL_BOT_TOKEN }}
+          SLACK_ONCALL_USERGROUP_ID: ${{ secrets.SLACK_ONCALL_USERGROUP_ID }}
+          SLACK_ONCALL_CHANNEL_ID: ${{ secrets.SLACK_ONCALL_CHANNEL_ID }}
+          SLACK_ONCALL_ROTATION_LIST: ${{ secrets.SLACK_ONCALL_ROTATION_LIST }}
+        run: ./scripts/rotate-slack-oncall.sh

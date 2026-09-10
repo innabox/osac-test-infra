@@ -324,6 +324,12 @@ shows up, even as "skipped", on a PR that only touches monitoring config):
 - `.github/workflows/validate-monitoring.yml` — runs on PRs touching `monitoring/**`; config/rules/dashboard sanity checks, no secrets needed
 - `.github/workflows/deploy-monitoring.yml` — runs on push to `main` (or manual dispatch) on the dedicated `monitoring-central` self-hosted runner; refreshes the live stack and fans out to registered remote runners
 
+### Slack On-Call Rotation
+
+- `.github/workflows/rotate-slack-oncall.yml` — targets 6am Europe (CET/CEST, `Europe/Berlin`) every Wednesday; since Actions cron is UTC-only and Central Europe switches between CET/CEST, it schedules both UTC offsets (`0 4 * * 3` and `0 5 * * 3`) and a "Check Europe-local run time" gate step matches `github.event.schedule` against whichever entry corresponds to the *current* UTC offset (not just a wall-clock hour check, which a delayed run of the inactive-season cron could cross into and cause a duplicate). Also has `workflow_dispatch`. Runs on `ubuntu-latest` with plain repo secrets (no Vault — unlike the workflows above, this has no self-hosted-runner dependency)
+- `scripts/rotate-slack-oncall.sh` — picks `(whole weeks elapsed since a fixed reference Wednesday) % len(rotation list)` as the index into `SLACK_ONCALL_ROTATION_LIST` (not the ISO week number itself, which resets from 52/53 back to 1 every year and would otherwise pick the same person twice at that boundary for some list lengths), updates `SLACK_ONCALL_USERGROUP_ID`'s sole member via `usergroups.users.update`, and posts the new on-call (plus the Wed-through-Tue duty window) to `SLACK_ONCALL_CHANNEL_ID`. Stateless by design: the index and window are derived from the most recently started Wednesday on or before "today", so a missed/re-run week or a manual run on a non-Wednesday still self-corrects to the right person and dates instead of drifting. Logs use the rotation index, not the selected email, since this repo is public and Actions logs are visible to anyone
+- Required secrets: `SLACK_ONCALL_BOT_TOKEN` (scopes: `chat:write`, `usergroups:write`, `users:read`, `users:read.email`), `SLACK_ONCALL_USERGROUP_ID`, `SLACK_ONCALL_CHANNEL_ID`, `SLACK_ONCALL_ROTATION_LIST` (comma-separated emails)
+
 ## Code Style
 
 **Formatter**: ruff format (line-length: 120, skip-magic-trailing-comma: true)
