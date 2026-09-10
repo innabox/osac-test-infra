@@ -1,39 +1,67 @@
 ---
 name: label-gate
 
-permissions:
-  contents: read
-
+# Required check for main + merge queue. Always read live PR labels via the
+# API — the webhook payload can still list lgtm on synchronize before Prow
+# strips it. merge_group must re-check the source PR; auto-passing here is
+# how PRs without lgtm (e.g. osac-test-infra#411) landed.
 on:
   pull_request:
     types: [opened, labeled, unlabeled, synchronize, reopened]
     branches: [main]
   merge_group:
 
+permissions:
+  pull-requests: read  # gh pr view labels
+
+concurrency:
+  group: label-gate-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: true
+
+env:
+  REQUIRED_LABELS_JSON: '["lgtm","approved","jira/valid-reference"]'
+
 jobs:
   check-labels:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # default token
+      pull-requests: read  # gh pr view labels
     steps:
-      - name: Auto-pass for merge queue
-        if: github.event_name == 'merge_group'
-        run: echo "Labels already validated on PR"
       - name: Check required Prow labels
-        if: github.event_name == 'pull_request'
         env:
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
         run: |
-          missing=()
-          for label in lgtm approved jira/valid-reference; do
-            if ! echo "$LABELS" | jq -e "index(\"$label\")" > /dev/null 2>&1; then
-              missing+=("$label")
+          set -euo pipefail
+          pr=""
+          if [[ "${EVENT_NAME}" == "merge_group" ]]; then
+            if [[ "${HEAD_REF}" =~ (^|/)pr-([0-9]+)- ]]; then
+              pr="${BASH_REMATCH[2]}"
+            else
+              echo "::error::Cannot parse PR number from merge_group head_ref=${HEAD_REF}"
+              exit 1
             fi
-          done
-          if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "::error::Missing required labels: ${missing[*]}"
+          else
+            pr="${PR_NUMBER}"
+          fi
+          if [[ ! "${pr}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number '${pr}'"
+            exit 1
+          fi
+          echo "Checking labels on PR #${pr} (${EVENT_NAME})"
+          labels=$(gh pr view "${pr}" --repo "${REPO}" --json labels --jq '[.labels[].name]')
+          echo "labels=${labels}"
+          missing=$(jq -r --argjson req "${REQUIRED_LABELS_JSON}" '$req - . | .[]' <<<"${labels}")
+          if [[ -n "${missing}" ]]; then
+            echo "::error::Missing required labels: ${missing}"
             echo ""
             echo "Required labels are set by Prow plugins via OWNERS files:"
-            echo "  lgtm           - reviewer types /lgtm"
-            echo "  approved       - approver types /approve"
+            echo "  lgtm                 - reviewer types /lgtm"
+            echo "  approved             - approver types /approve"
             echo "  jira/valid-reference - PR title has valid Jira key"
             exit 1
           fi
