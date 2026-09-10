@@ -65,12 +65,16 @@ jobs:
       # Same data as the Slack report's embedded JSON, published as a
       # workflow artifact so external consumers (e.g. org-pulse) can pull
       # it via the GitHub API instead of scraping it out of the HTML.
+      # if: always() so this still runs (and uploads) even if the Slack
+      # post itself failed after writing ci-digest-data.json -- but unlike
+      # the optional debug-log artifacts elsewhere in this repo, this file
+      # is the actual deliverable, so a missing file should fail this step
+      # rather than being silently ignored.
       - name: Upload digest data
         if: always()
-        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-digest-data
           path: ci-digest-data.json
           retention-days: 14
-          if-no-files-found: ignore
+          if-no-files-found: error
