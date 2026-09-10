@@ -18,10 +18,11 @@
 #
 # Required env vars:
 #   SLACK_BOT_TOKEN             Bot token with usergroups:write, users:read,
-#                               users:read.email, chat:write scopes
+#                               chat:write scopes
 #   SLACK_ONCALL_USERGROUP_ID   Usergroup ID to update (e.g. S0123ABCDEF)
 #   SLACK_ONCALL_CHANNEL_ID     Channel ID to post the announcement to
-#   SLACK_ONCALL_ROTATION_LIST  Comma-separated list of email addresses
+#   SLACK_ONCALL_ROTATION_LIST  Comma-separated list of Slack user IDs
+#                               (e.g. U0123ABCDEF), not email addresses
 set -euo pipefail
 
 : "${SLACK_BOT_TOKEN:?SLACK_BOT_TOKEN is required}"
@@ -87,17 +88,16 @@ REFERENCE_WEDNESDAY="2024-01-03"
 DAYS_SINCE_REFERENCE=$(( ( $(date -u -d "$ANCHOR_DATE" +%s) - $(date -u -d "$REFERENCE_WEDNESDAY" +%s) ) / 86400 ))
 WEEKS_ELAPSED=$(( DAYS_SINCE_REFERENCE / 7 ))
 INDEX=$(( ((WEEKS_ELAPSED % COUNT) + COUNT) % COUNT ))
-CURRENT_EMAIL="${PEOPLE[$INDEX]}"
+USER_ID="${PEOPLE[$INDEX]}"
 
 DUTY_START=$(date -u -d "$ANCHOR_DATE" +"%b %-d, %Y")
 DUTY_END=$(date -u -d "$ANCHOR_DATE +6 days" +"%b %-d, %Y")
 
 echo "Week ${WEEKS_ELAPSED} since ${REFERENCE_WEDNESDAY}: rotating on-call (index ${INDEX} of ${COUNT}), duty window ${DUTY_START} - ${DUTY_END}"
 
-LOOKUP=$(slack_get "users.lookupByEmail" --data-urlencode "email=${CURRENT_EMAIL}")
-check_ok "$LOOKUP" "users.lookupByEmail(index ${INDEX})"
-USER_ID=$(echo "$LOOKUP" | jq -r '.user.id')
-USER_DISPLAY_NAME=$(echo "$LOOKUP" | jq -r '.user.real_name // .user.name // .user.id')
+INFO=$(slack_get "users.info" --data-urlencode "user=${USER_ID}")
+check_ok "$INFO" "users.info(index ${INDEX})"
+USER_DISPLAY_NAME=$(echo "$INFO" | jq -r '.user.real_name // .user.name // .user.id')
 
 UPDATE_PAYLOAD=$(jq -n --arg usergroup "$SLACK_ONCALL_USERGROUP_ID" --arg users "$USER_ID" \
     '{usergroup: $usergroup, users: $users}')
