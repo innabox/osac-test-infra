@@ -468,6 +468,8 @@ jobs:
             cp "${OSAC_CLI_BIN}" ./osac-cli-bin
             BUILD_ARGS="--build-arg OSAC_CLI_BIN=osac-cli-bin"
           fi
+          podman pull --retry 3 registry.access.redhat.com/ubi9/ubi:latest
+          podman pull --retry 3 ghcr.io/astral-sh/uv:latest
           podman build --no-cache ${BUILD_ARGS} -t "${E2E_IMAGE}" -f Containerfile .
           rm -f ./osac-cli-bin
 
