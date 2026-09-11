@@ -731,28 +731,28 @@ jobs:
           EOF
           done
 
-          # VMaaS autouse waits on ClusterStorageReady; without it tests sit
-          # ~10m then fail. storageFulfillment overlay should create the
-          # labeled StorageClasses — fail here if they never appear.
-          for tenant in "${INSTALLER_NAMESPACE}" shared; do
-            echo "Waiting for Tenant/${tenant} ClusterStorageReady=True..."
-            ready=""
-            for i in $(seq 1 60); do
-              ready=$(oc get tenant "${tenant}" -n "${INSTALLER_NAMESPACE}" \
-                -o jsonpath='{range .status.conditions[?(@.type=="ClusterStorageReady")]}{.status}{end}' 2>/dev/null || true)
-              if [[ "${ready}" == "True" ]]; then
-                echo "Tenant/${tenant} ClusterStorageReady=True (attempt ${i})"
-                break
-              fi
-              if [[ "${i}" -eq 60 ]]; then
-                echo "::error::Tenant/${tenant} ClusterStorageReady did not become True (last status='${ready}')"
-                oc get tenant "${tenant}" -n "${INSTALLER_NAMESPACE}" -o yaml || true
-                oc get sc --show-labels || true
-                exit 1
-              fi
-              echo "  attempt ${i}/60 status='${ready:-unset}', retrying in 10s..."
-              sleep 10
-            done
+          # VMaaS autouse waits on ClusterStorageReady for the test namespace
+          # only (not catalog tenant "shared"). AAP storage jobs can race the
+          # LVMS StorageTier hook; shared often stays False while
+          # INSTALLER_NAMESPACE recovers. Fail install if the test tenant
+          # never gets a StorageClass — otherwise pytest hangs ~10m.
+          echo "Waiting for Tenant/${INSTALLER_NAMESPACE} ClusterStorageReady=True..."
+          ready=""
+          for i in $(seq 1 60); do
+            ready=$(oc get tenant "${INSTALLER_NAMESPACE}" -n "${INSTALLER_NAMESPACE}" \
+              -o jsonpath='{range .status.conditions[?(@.type=="ClusterStorageReady")]}{.status}{end}' 2>/dev/null || true)
+            if [[ "${ready}" == "True" ]]; then
+              echo "Tenant/${INSTALLER_NAMESPACE} ClusterStorageReady=True (attempt ${i})"
+              break
+            fi
+            if [[ "${i}" -eq 60 ]]; then
+              echo "::error::Tenant/${INSTALLER_NAMESPACE} ClusterStorageReady did not become True (last status='${ready}')"
+              oc get tenant "${INSTALLER_NAMESPACE}" -n "${INSTALLER_NAMESPACE}" -o yaml || true
+              oc get sc --show-labels || true
+              exit 1
+            fi
+            echo "  attempt ${i}/60 status='${ready:-unset}', retrying in 10s..."
+            sleep 10
           done
 
           # helm --wait only confirms the *new* pod/ReplicaSet is Ready -- it
