@@ -25,6 +25,7 @@ if ! pr_is_open; then
   echo "PR #${PR_NUMBER} is $(jq -r '.state' <<<"${pr_json}") (not open); skipping."
   exit 0
 fi
+export HEAD_SHA
 HEAD_SHA=$(jq -r '.head.sha' <<<"${pr_json}")
 HEAD_REPO=$(jq -r '.head.repo.full_name // empty' <<<"${pr_json}")
 HEAD_REF=$(jq -r '.head.ref // empty' <<<"${pr_json}")
