@@ -4,7 +4,7 @@ ARG GRPCURL_VERSION=1.9.1
 ARG OSAC_VERSION=""
 ARG OSAC_CLI_BIN=""
 
-RUN dnf install -y python3.11 python3.11-pip make jq openssh-clients && dnf clean all
+RUN dnf install -y --setopt=retries=5 python3.11 python3.11-pip make jq openssh-clients && dnf clean all
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl --retry 5 --retry-delay 2 -Lsf "https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/stable/openshift-client-linux.tar.gz" \
@@ -47,7 +47,11 @@ RUN set -euo pipefail; \
 WORKDIR /tests
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --python python3.11
+RUN for attempt in 1 2 3; do \
+      uv sync --frozen --python python3.11 && break; \
+      echo "uv sync attempt ${attempt} failed; retrying in 5s..."; \
+      sleep 5; \
+    done
 
 COPY . .
 RUN rm -f osac-cli-bin
